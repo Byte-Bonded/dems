@@ -1,5 +1,5 @@
 import React from 'react';
-import { FaRobot, FzBarChart, FaShieldAlt, FaZap, FaDatabase, FaCloud } from 'react-icons/fa';
+import { FaRobot, FaChartBar, FaShieldAlt, FaZap, FaDatabase, FaCloud } from 'react-icons/fa';
 import './Features.css';
 
 function Features() {
@@ -10,7 +10,7 @@ function Features() {
       description: 'Advanced Reinforcement Learning agents continuously optimize energy distribution and storage management in real-time.'
     },
     {
-      icon: <FzBarChart />,
+      icon: <FaChartBar />,
       title: 'Real-Time Monitoring',
       description: 'Prometheus metrics and Grafana dashboards provide comprehensive visibility into your energy system performance.'
     },
