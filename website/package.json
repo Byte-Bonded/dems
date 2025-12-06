@@ -15,7 +15,8 @@
   "devDependencies": {
     "react-scripts": "5.0.1",
     "@types/react": "^18.0.0",
-    "@types/react-dom": "^18.0.0"
+    "@types/react-dom": "^18.0.0",
+    "gh-pages": "^4.0.0"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -41,8 +42,5 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
-  },
-  "devDependencies": {
-    "gh-pages": "^4.0.0"
   }
 }
