@@ -1,5 +1,5 @@
 import React from 'react';
-import { FaRobot, FaChartBar, FaShieldAlt, FaZap, FaDatabase, FaCloud } from 'react-icons/fa';
+import { FaRobot, FaChartBar, FaShieldAlt, FaBolt, FaDatabase, FaCloud } from 'react-icons/fa';
 import './Features.css';
 
 function Features() {
@@ -20,7 +20,7 @@ function Features() {
       description: 'Intelligent algorithms maintain grid frequency and voltage stability, preventing outages and ensuring reliability.'
     },
     {
-      icon: <FaZap />,
+      icon: <FaBolt />,
       title: 'Smart Distribution',
       description: 'Dynamic load balancing across grid nodes minimizes losses and maximizes efficiency.'
     },
