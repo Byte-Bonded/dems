@@ -35,10 +35,10 @@ def track_performance(func: Callable) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        optimization_requests.inc()
         with optimization_duration.time():
             try:
                 result = func(*args, **kwargs)
-                optimization_requests.inc()
                 return result
             except Exception as e:
                 optimization_errors.inc()

@@ -1,1 +1,1 @@
-#Have to contruct python file for the grid setup 
+# TODO: Construct Python file for the grid setup

@@ -1,0 +1,147 @@
+/* Documentation Styles */
+.documentation {
+  padding: 4rem 0;
+}
+
+.documentation h1 {
+  margin-bottom: 3rem;
+  text-align: center;
+}
+
+.doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 2rem;
+  margin-bottom: 3rem;
+}
+
+.doc-section {
+  background: white;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 2rem;
+}
+
+.doc-section h2 {
+  color: var(--primary-color);
+  margin-bottom: 1.5rem;
+  font-size: 1.5rem;
+  border-bottom: 2px solid var(--primary-light);
+  padding-bottom: 1rem;
+}
+
+.doc-section h3 {
+  color: var(--text-primary);
+  margin-top: 1.5rem;
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+}
+
+.doc-section ul {
+  list-style: none;
+  padding: 0;
+}
+
+.doc-section li {
+  margin-bottom: 0.75rem;
+  padding-left: 1.5rem;
+  position: relative;
+  color: var(--text-secondary);
+}
+
+.doc-section li:before {
+  content: "▸";
+  position: absolute;
+  left: 0;
+  color: var(--primary-color);
+  font-weight: bold;
+}
+
+pre {
+  background: var(--accent-gray);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+
+code {
+  font-family: 'Courier New', monospace;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.doc-resources {
+  background: linear-gradient(135deg, rgba(232, 91, 127, 0.05) 0%, rgba(255, 255, 255, 0.5) 100%);
+  border: 2px solid var(--primary-light);
+}
+
+.doc-resources h2 {
+  text-align: center;
+  border: none;
+  padding: 0;
+  margin-bottom: 2rem;
+}
+
+.resources-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 2rem;
+}
+
+.resource-link {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 1.5rem;
+  background: white;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+  text-decoration: none;
+  color: inherit;
+}
+
+.resource-link:hover {
+  border-color: var(--primary-color);
+  box-shadow: 0 8px 20px rgba(232, 91, 127, 0.15);
+  transform: translateY(-4px);
+}
+
+.resource-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.resource-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.resource-desc {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 768px) {
+  .doc-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .doc-section {
+    padding: 1.5rem;
+  }
+
+  .resources-grid {
+    grid-template-columns: 1fr;
+  }
+
+  pre {
+    overflow-x: auto;
+    font-size: 0.8rem;
+  }
+}
