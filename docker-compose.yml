@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # DEMS Backend API
+  dems-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - DATABASE_URL=postgresql://dems:dems@postgres:5432/dems
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - dems-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - dems-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - dems-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:14
+    environment:
+      - POSTGRES_USER=dems
+      - POSTGRES_PASSWORD=dems
+      - POSTGRES_DB=dems
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - dems-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - dems-network
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  postgres-data:
+  redis-data:
+
+networks:
+  dems-network:
+    driver: bridge

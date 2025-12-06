@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+*.log
+.env
+.env.local
+.env.*.local
+secrets/
+data/
+results/
+
+# React/Node
+website/node_modules/
+website/.next/
+website/out/
+website/build/
+website/.env.local
+website/.env.*.local
+
+# Monitoring
+prometheus/data/
+grafana/data/
+
+# Docker
+.dockerignore
