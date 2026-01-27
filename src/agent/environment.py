@@ -6,7 +6,7 @@ Gymnasium-compatible environment for training RL agents with physics-based dynam
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 
 
 class DEMSEnvironment(gym.Env):
@@ -208,7 +208,7 @@ class DEMSEnvironment(gym.Env):
 
         return float(reward)
 
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """
         Advance the environment one timestep using the provided per-node control action.
         
@@ -218,20 +218,12 @@ class DEMSEnvironment(gym.Env):
             action (np.ndarray): Per-node control values in [0, 1] representing charge/discharge commands.
         
         Returns:
-            observation (np.ndarray): Current clipped observation vector for the environment.
-            reward (float): Scalar reward computed for this timestep.
-            done (bool): `True` if the episode has reached its maximum number of steps, `False` otherwise.
-            info (Dict): Diagnostic information containing:
-                - "step": current step index (int)
-                - "episode_reward": cumulative episode reward (float)
-                - "action_applied": validated action array (np.ndarray)
-                - "storage_levels": per-node storage levels (np.ndarray)
-                - "demands": per-node demands (np.ndarray)
-                - "charge_discharge": per-node charge/discharge amounts (np.ndarray)
-                - "global_frequency": computed global frequency (float)
-                - "global_voltage": computed global voltage (float)
-                - "avg_storage_ratio": average storage as a fraction of max per-node storage (float)
-        
+            observation: Current state observation
+            reward: Step reward
+            terminated: Episode ended due to reaching a terminal state
+            truncated: Episode ended due to reaching max_steps
+            info: Additional information (metrics, validated action, etc.)
+            
         Raises:
             ValueError: If `action` does not have the required shape or contains invalid values.
         """
@@ -250,8 +242,9 @@ class DEMSEnvironment(gym.Env):
         reward = self._calculate_reward(metrics, action)
         self.episode_reward += reward
 
-        # Check if episode is done
-        done = self.current_step >= self.max_steps
+        # Check if episode is done (truncated by max_steps, not terminated by state)
+        terminated = False  # No terminal states in this environment
+        truncated = self.current_step >= self.max_steps
 
         # Build info dictionary with applied action and resulting state metrics
         info = {
@@ -266,22 +259,43 @@ class DEMSEnvironment(gym.Env):
             "avg_storage_ratio": np.mean(metrics["storage_levels"]) / self.max_storage_per_node,
         }
 
-        return self._get_obs(), reward, done, info
+        return self._get_obs(), reward, terminated, truncated, info
 
-    def reset(self) -> np.ndarray:
-        """
-        Reset the environment to its initial state and prepare for a new episode.
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None
+    ) -> Tuple[np.ndarray, dict]:
+        """Reset environment to initial state.
         
-        This resets the step counter and episode reward, reinitializes per-node storage,
-        loads, and the internal observation state.
+        Args:
+            seed: Optional random seed for reproducibility. If provided,
+                  seeds the environment's RNG via super().reset().
+            options: Optional dict of reset options (currently unused but
+                     available for future extensibility).
         
         Returns:
-            initial_observation (np.ndarray): Normalized initial observation vector for the environment.
+            observation: Initial observation from _get_obs().
+            info: Dictionary containing reset information (empty by default,
+                  or populated with options-related data if provided).
         """
+        # Call parent reset to handle seeding
+        super().reset(seed=seed)
+        
+        # Reset episode tracking
         self.current_step = 0
         self.episode_reward = 0
-        self._initialize_state()  # Initialize storage, loads, and state
-        return self._get_obs()
+        
+        # Initialize storage, loads, and state
+        self._initialize_state()
+        
+        # Build info dict
+        info = {}
+        if options is not None:
+            info["options"] = options
+        
+        return self._get_obs(), info
 
     def render(self, mode: str = "human") -> None:
         """

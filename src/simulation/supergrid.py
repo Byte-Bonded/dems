@@ -887,7 +887,17 @@ class SuperGrid:
     def reset_to_base_case(self) -> None:
         """Reset the grid to the original IEEE 39-bus base case values"""
         logger.info("Resetting grid to base case...")
+        
+        # Rebuild the grid from scratch
         self._build_supergrid()
+        
+        # Reset instance variables to initial state
+        self.der_manager = None
+        self.dynamics = None
+        self.system_frequency_hz = 50.0
+        
+        # Ensure grid state is consistent after reset
+        self._improve_convergence()
         
     def __repr__(self) -> str:
         """

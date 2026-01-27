@@ -187,10 +187,7 @@ pytest --cov=src tests/
 ## 📚 Documentation
 
 - [DER Integration Guide](docs/DER_GUIDE.md) - How DER works with SuperGrid
-- [RL Control Strategy](docs/RL_CONTROL_STRATEGY.md) - RL approach
-- [Architecture](docs/ARCHITECTURE.md) - System design
-- [API Reference](docs/API.md) - API endpoints
-- [Project Summary](docs/PROJECT_SUMMARY.md) - Overview
+- [Project Changelog](PROJECT_CHANGELOG.md) - Development summary and milestones
 
 ## 🎯 Current Status
 

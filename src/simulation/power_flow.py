@@ -412,5 +412,5 @@ def quick_power_flow(net: pp.pandapowerNet) -> bool:
     try:
         pp.runpp(net, max_iteration=30)
         return net.converged
-    except:
+    except Exception:
         return False
