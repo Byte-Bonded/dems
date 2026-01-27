@@ -27,7 +27,7 @@ der_manager.set_demand_response_curtailment("DR_Industrial_A1", 0.5)  # 50% curt
 
 # Run power flow
 result = grid.run_power_flow()
-print(f"Converged: {result.converged}")
+print(f"Converged: {result['converged']}")
 ```
 
 ## Default DER Configuration
@@ -66,4 +66,4 @@ state = der_manager.get_der_state(name)
 all_states = der_manager.get_all_der_states()
 ```
 
-For complete documentation with examples, see DER_GUIDE_OLD.md or the code docstrings.
+For complete documentation with examples, see the code docstrings in `src/simulation/der.py`.

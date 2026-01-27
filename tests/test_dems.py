@@ -111,25 +111,28 @@ class TestEnvironment:
         
     def test_reset(self, environment):
         """Test reset returns valid observation"""
-        obs = environment.reset()
+        obs, info = environment.reset()
         assert obs.shape == environment.observation_space.shape
         assert environment.current_step == 0
+        assert isinstance(info, dict)
         
     def test_step(self, environment):
         """Test step returns valid outputs"""
         environment.reset()
         action = environment.action_space.sample()
-        obs, reward, done, info = environment.step(action)
+        obs, reward, terminated, truncated, _info = environment.step(action)
+        done = terminated or truncated
         
         assert obs is not None
-        assert isinstance(reward, float)
+        assert isinstance(reward, (float, int))
         assert isinstance(done, bool)
         
     def test_episode_termination(self, environment):
         """Test episode terminates at max_steps"""
         environment.reset()
         for _ in range(100):
-            _, _, done, _ = environment.step(environment.action_space.sample())
+            _, _, terminated, truncated, _ = environment.step(environment.action_space.sample())
+        done = terminated or truncated
         assert done
 
 

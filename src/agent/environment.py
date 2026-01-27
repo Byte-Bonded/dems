@@ -6,7 +6,7 @@ Gymnasium-compatible environment for training RL agents with physics-based dynam
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 
 
 class DEMSEnvironment(gym.Env):
@@ -208,7 +208,7 @@ class DEMSEnvironment(gym.Env):
 
         return float(reward)
 
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """
         Execute one step in the DEMS environment
         
@@ -218,7 +218,8 @@ class DEMSEnvironment(gym.Env):
         Returns:
             observation: Current state observation
             reward: Step reward
-            done: Episode termination flag
+            terminated: Episode ended due to reaching a terminal state
+            truncated: Episode ended due to reaching max_steps
             info: Additional information (metrics, validated action, etc.)
             
         Raises:
@@ -239,8 +240,9 @@ class DEMSEnvironment(gym.Env):
         reward = self._calculate_reward(metrics, action)
         self.episode_reward += reward
 
-        # Check if episode is done
-        done = self.current_step >= self.max_steps
+        # Check if episode is done (truncated by max_steps, not terminated by state)
+        terminated = False  # No terminal states in this environment
+        truncated = self.current_step >= self.max_steps
 
         # Build info dictionary with applied action and resulting state metrics
         info = {
@@ -255,14 +257,43 @@ class DEMSEnvironment(gym.Env):
             "avg_storage_ratio": np.mean(metrics["storage_levels"]) / self.max_storage_per_node,
         }
 
-        return self._get_obs(), reward, done, info
+        return self._get_obs(), reward, terminated, truncated, info
 
-    def reset(self) -> np.ndarray:
-        """Reset environment to initial state"""
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None
+    ) -> Tuple[np.ndarray, dict]:
+        """Reset environment to initial state.
+        
+        Args:
+            seed: Optional random seed for reproducibility. If provided,
+                  seeds the environment's RNG via super().reset().
+            options: Optional dict of reset options (currently unused but
+                     available for future extensibility).
+        
+        Returns:
+            observation: Initial observation from _get_obs().
+            info: Dictionary containing reset information (empty by default,
+                  or populated with options-related data if provided).
+        """
+        # Call parent reset to handle seeding
+        super().reset(seed=seed)
+        
+        # Reset episode tracking
         self.current_step = 0
         self.episode_reward = 0
-        self._initialize_state()  # Initialize storage, loads, and state
-        return self._get_obs()
+        
+        # Initialize storage, loads, and state
+        self._initialize_state()
+        
+        # Build info dict
+        info = {}
+        if options is not None:
+            info["options"] = options
+        
+        return self._get_obs(), info
 
     def render(self, mode: str = "human") -> None:
         """Render environment state"""
