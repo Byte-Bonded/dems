@@ -19,9 +19,11 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache/
 
 # Virtual environments
 venv/
+.venv/
 ENV/
 env/
 
@@ -41,6 +43,13 @@ env/
 secrets/
 data/
 results/
+
+# Temporary test files
+compare_*.py
+detailed_comparison.py
+minimal_test.py
+*_assessment.md
+BRUTAL_*.md
 
 # React/Node
 website/node_modules/

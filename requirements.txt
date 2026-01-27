@@ -5,10 +5,17 @@ scikit-learn>=1.0.0
 torch>=1.10.0
 tensorflow>=2.7.0
 
+# Power System Simulation
+# pandapower 3.x has improved performance and security fixes
+pandapower>=3.0.0
+# networkx 3.x required for Python 3.10+ compatibility
+networkx>=3.2.0
+
 # RL Framework & Agent
-stable-baselines3>=1.5.0
-ray[rllib]>=1.13.0
-gym>=0.21.0
+stable-baselines3>=2.0.0
+ray[rllib]>=2.0.0
+# Using gymnasium (gym is deprecated and incompatible with NumPy 2.0)
+gymnasium>=1.0.0
 tensorboard>=2.8.0
 
 # API & Web

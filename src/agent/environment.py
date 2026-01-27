@@ -1,10 +1,10 @@
 """
 DEMS Environment for RL Training
-Gym-compatible environment for training RL agents with physics-based dynamics
+Gymnasium-compatible environment for training RL agents with physics-based dynamics
 """
 
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
 from typing import Tuple, Dict, Any
 
@@ -258,10 +258,10 @@ class DEMSEnvironment(gym.Env):
         return self._get_obs(), reward, done, info
 
     def reset(self) -> np.ndarray:
-        """Reset environment"""
+        """Reset environment to initial state"""
         self.current_step = 0
         self.episode_reward = 0
-        self.state = np.random.rand(self.observation_space.shape[0]).astype(np.float32)
+        self._initialize_state()  # Initialize storage, loads, and state
         return self._get_obs()
 
     def render(self, mode: str = "human") -> None:
