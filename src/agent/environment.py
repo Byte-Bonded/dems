@@ -210,19 +210,30 @@ class DEMSEnvironment(gym.Env):
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
         """
-        Execute one step in the DEMS environment
+        Advance the environment one timestep using the provided per-node control action.
         
-        Args:
-            action: Control action for charge/discharge per node [0, 1]
-            
+        Validates and applies the action, updates the environment dynamics, accumulates reward, and prepares diagnostic info for the step.
+        
+        Parameters:
+            action (np.ndarray): Per-node control values in [0, 1] representing charge/discharge commands.
+        
         Returns:
-            observation: Current state observation
-            reward: Step reward
-            done: Episode termination flag
-            info: Additional information (metrics, validated action, etc.)
-            
+            observation (np.ndarray): Current clipped observation vector for the environment.
+            reward (float): Scalar reward computed for this timestep.
+            done (bool): `True` if the episode has reached its maximum number of steps, `False` otherwise.
+            info (Dict): Diagnostic information containing:
+                - "step": current step index (int)
+                - "episode_reward": cumulative episode reward (float)
+                - "action_applied": validated action array (np.ndarray)
+                - "storage_levels": per-node storage levels (np.ndarray)
+                - "demands": per-node demands (np.ndarray)
+                - "charge_discharge": per-node charge/discharge amounts (np.ndarray)
+                - "global_frequency": computed global frequency (float)
+                - "global_voltage": computed global voltage (float)
+                - "avg_storage_ratio": average storage as a fraction of max per-node storage (float)
+        
         Raises:
-            ValueError: If action shape is invalid
+            ValueError: If `action` does not have the required shape or contains invalid values.
         """
         # Validate action at start of step
         try:
@@ -258,14 +269,24 @@ class DEMSEnvironment(gym.Env):
         return self._get_obs(), reward, done, info
 
     def reset(self) -> np.ndarray:
-        """Reset environment to initial state"""
+        """
+        Reset the environment to its initial state and prepare for a new episode.
+        
+        This resets the step counter and episode reward, reinitializes per-node storage,
+        loads, and the internal observation state.
+        
+        Returns:
+            initial_observation (np.ndarray): Normalized initial observation vector for the environment.
+        """
         self.current_step = 0
         self.episode_reward = 0
         self._initialize_state()  # Initialize storage, loads, and state
         return self._get_obs()
 
     def render(self, mode: str = "human") -> None:
-        """Render environment state"""
+        """
+        Print the current simulation step and accumulated episode reward.
+        """
         print(f"Step: {self.current_step}, Episode Reward: {self.episode_reward:.2f}")
 
     def close(self) -> None:

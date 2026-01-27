@@ -126,10 +126,12 @@ class SuperGrid:
     
     def __init__(self, config: Optional[SuperGridConfig] = None):
         """
-        Initialize the Tri-Area Super-Grid
+        Constructs the merged 117-bus Tri-Area Super-Grid and applies initial configuration.
         
-        Args:
-            config: Grid configuration parameters
+        Builds three IEEE 39-bus areas, assigns per-area offsets and visual metadata, creates the predefined tie-line topology for N-1 security, merges the networks into a single pandapower net, and runs initial convergence-improvement steps. Leaves DER manager and dynamics coordinator uninitialized (placeholders), and initializes the system frequency to the configured nominal value.
+        
+        Parameters:
+            config (Optional[SuperGridConfig]): Optional grid-wide configuration; when omitted a default SuperGridConfig is used.
         """
         self.config = config or SuperGridConfig()
         self.net: Optional[pp.pandapowerNet] = None
@@ -231,7 +233,9 @@ class SuperGrid:
         
     def _build_supergrid(self) -> None:
         """
-        Build the 117-bus super-grid by merging three IEEE 39-bus systems
+        Construct the 117-bus super-grid by merging three IEEE 39-bus systems.
+        
+        Builds the combined network and applies post-merge configuration: assigns the merged Network object to self.net, updates per-area bus/generator/load mappings, adds inter-area tie-lines, and configures the system slack/reference bus for power flow.
         """
         logger.info("Building Tri-Area Super-Grid (117 buses)...")
         
@@ -270,13 +274,16 @@ class SuperGrid:
     
     def _improve_convergence(self) -> None:
         """
-        Improve power flow convergence with voltage correction
+        Improve the network power flow convergence by adjusting reactive limits and adding shunt compensation.
         
-        Uses an iterative approach to achieve 0.95-1.05 pu voltage profile
+        This method modifies the internal pandapower network to help achieve a bus voltage profile within 0.95–1.05 pu. Changes and effects:
+        - Ensures generators can absorb reactive power by relaxing positive min Q limits and expanding max Q capability.
+        - Sets generator and slack voltage setpoints to 1.00 pu.
+        - Runs up to five Newton–Raphson power-flow attempts and stops early if all bus voltages are within 0.95–1.05 pu.
+        - Adds shunt elements at buses with persistently low or high voltages to provide capacitive or inductive reactive compensation respectively.
+        - Logs progress and final counts of shunts and net reactive injection.
         
-        Note: In pandapower, shunt q_mvar convention:
-        - Positive q_mvar = inductive (absorbs reactive power, lowers voltage)
-        - Negative q_mvar = capacitive (supplies reactive power, raises voltage)
+        Note: In pandapower, positive shunt q_mvar is inductive (absorbs reactive power, lowers voltage) and negative q_mvar is capacitive (supplies reactive power, raises voltage).
         """
         logger.info("Applying voltage corrections...")
         
@@ -345,16 +352,12 @@ class SuperGrid:
     
     def initialize_dynamics(self) -> DynamicsCoordinator:
         """
-        Initialize dynamic models for frequency simulation
+        Initialize IEEE-39-standard dynamic models for all generators and area-level AGC.
         
-        Creates IEEE-standard dynamic models for all generators:
-        - Swing equation dynamics
-        - IEEE Type 1 excitation (AVR)
-        - IEEE TGOV1 governor-turbine
-        - AGC for each area
+        Creates per-generator dynamic models (swing dynamics) with automatic voltage regulators (AVR) and governor-turbine controllers; units with MVA >= 600 also receive a power system stabilizer (PSS). For each area, an AGC controller is created with participation factors proportional to generator MVA.
         
         Returns:
-            DynamicsCoordinator for managing dynamics simulation
+            DynamicsCoordinator: coordinator managing the added generator dynamics and AGC controllers.
         """
         logger.info("Initializing dynamic models (IEEE 39-bus standard)...")
         
@@ -401,13 +404,19 @@ class SuperGrid:
     
     def step_dynamics(self, dt: float = 0.01) -> Dict:
         """
-        Advance dynamics simulation by one time step
+        Advance the dynamic simulation by a single integration step.
         
-        Args:
-            dt: Time step in seconds (default 10ms)
-            
+        Parameters:
+            dt (float): Time step in seconds (e.g., 0.01 for 10 ms).
+        
         Returns:
-            Dictionary with updated system state including frequency
+            result (dict): Simulation result dictionary containing dynamics outputs. Includes at minimum
+                'system_frequency_hz' with the updated system frequency in Hz; may include additional
+                per-generator or per-bus dynamic state provided by the DynamicsCoordinator.
+        
+        Raises:
+            RuntimeError: If dynamics have not been initialized via initialize_dynamics().
+            RuntimeError: If a steady-state power flow has not been solved (net.res_bus is empty).
         """
         if self.dynamics is None:
             raise RuntimeError("Dynamics not initialized. Call initialize_dynamics() first.")
@@ -448,18 +457,23 @@ class SuperGrid:
         return result
     
     def get_system_frequency(self) -> float:
-        """Get current system frequency in Hz"""
+        """
+        Return the current system frequency of the super-grid.
+        
+        Returns:
+            current_frequency_hz (float): Current system frequency in hertz.
+        """
         return self.system_frequency_hz
     
     def initialize_der(self, add_default: bool = True) -> DERManager:
         """
-        Initialize Distributed Energy Resources (DER) in the grid
+        Create and register a DERManager for the current network.
         
-        Args:
-            add_default: If True, adds default DER configuration
-            
+        Parameters:
+            add_default (bool): If True, populate the manager with the module's default DER configuration.
+        
         Returns:
-            DERManager instance for managing DER
+            DERManager: The manager instance used to control and query distributed energy resources for this network.
         """
         self.der_manager = DERManager(self.net)
         
@@ -471,8 +485,14 @@ class SuperGrid:
     
     def _add_default_der(self) -> None:
         """
-        Add default DER configuration across all areas
-        Includes solar PV, wind farms, battery storage, EV charging, and demand response
+        Populate the DERManager with a predefined set of distributed energy resources for all three areas.
+        
+        Adds the following default DERs:
+        - Area A (bus offsets applied): solar PV at buses 3, 7, 15; a battery at bus 20; EV charging stations at buses 4 and 12; demand response at bus 8.
+        - Area B (39-bus offset): wind farms at buses 39+3 and 39+8; a battery at bus 39+15; an EV charging station at bus 39+7; demand response at buses 39+20 and 39+18.
+        - Area C (78-bus offset): solar PV at bus 78+4; a wind farm at bus 78+12; a battery at bus 78+25; EV charging stations at buses 78+8 and 78+16; demand response at bus 78+15.
+        
+        After adding resources, logs a short summary of the number of DER units and aggregated capacity by DER type.
         """
         logger.info("Adding default DER configuration...")
         
@@ -527,7 +547,13 @@ class SuperGrid:
             logger.info(f"  - {der_type.capitalize()}: {count} units, {total_capacity[der_type]:.1f} MW")
         
     def _update_area_mappings(self) -> None:
-        """Update area configurations with actual component indices after merging"""
+        """
+        Populate each area's mapping information after the merged network is constructed.
+        
+        For each configured area, sets `bus_range` to the area's global bus index span (offset to offset+38) and fills:
+        - `generator_indices` with indices of generators whose `bus` lies within that range.
+        - `load_indices` with indices of loads whose `bus` lies within that range.
+        """
         for area_id, area_config in self.areas.items():
             offset = area_config.bus_offset
             
@@ -547,7 +573,11 @@ class SuperGrid:
                         f"{len(area_config.load_indices)} loads")
     
     def _add_tie_lines(self) -> None:
-        """Add high-voltage tie-lines connecting the three areas"""
+        """
+        Add the configured inter-area high-voltage tie-lines to the merged network.
+        
+        Creates overhead transmission lines on self.net for each TieLineSpec in self.tie_line_specs by computing global bus indices from area offsets and the spec's local bus indices, applying the spec's electrical parameters (length, r/x/c per km) and a 345 kV-based current rating.
+        """
         logger.info(f"Adding {len(self.tie_line_specs)} inter-area tie-lines...")
         
         for spec in self.tie_line_specs:
@@ -573,7 +603,11 @@ class SuperGrid:
             logger.debug(f"Added tie-line: {spec.name} (Bus {from_bus} <-> Bus {to_bus})")
     
     def _configure_slack_bus(self) -> None:
-        """Configure the slack/reference bus for power flow"""
+        """
+        Configure the network slack/reference bus to Area A's bus 30 and set its voltage.
+        
+        Keeps only the first external grid element, assigns it to bus 30 (Area A slack) and sets its voltage setpoint to 1.03 pu.
+        """
         # In IEEE 39-bus, bus 30 (index 30) is typically the slack
         # After merging, Area A's bus 30 becomes the system slack
         slack_bus = 30  # Area A's slack bus
@@ -588,19 +622,23 @@ class SuperGrid:
             
     def get_area_state(self, area_id: AreaID) -> Dict:
         """
-        Get aggregated state for a specific area
+        Return aggregated operational metrics for the specified area.
         
-        Args:
-            area_id: Which area to query
-            
         Returns:
-            Dictionary with area metrics:
-            - total_generation_mw: Sum of active power generation
-            - total_load_mw: Sum of active power load
-            - avg_voltage_pu: Average bus voltage
-            - min_voltage_pu: Minimum bus voltage (constraint)
-            - max_voltage_pu: Maximum bus voltage (constraint)
-            - net_interchange_mw: Power flowing out of area (positive = export)
+            dict: Aggregated area metrics with keys:
+                - area_id (str): Area identifier value (e.g., "A", "B", "C").
+                - area_name (str): Human-readable area name.
+                - total_generation_mw (float): Sum of active power produced by generators in the area.
+                - total_load_mw (float): Sum of active power consumed by loads in the area.
+                - net_interchange_mw (float): Generation minus load (positive = net export).
+                - avg_voltage_pu (float): Mean per-unit bus voltage across the area's buses.
+                - min_voltage_pu (float): Minimum per-unit bus voltage in the area.
+                - max_voltage_pu (float): Maximum per-unit bus voltage in the area.
+                - num_generators (int): Number of generators in the area.
+                - num_loads (int): Number of loads in the area.
+        
+        Raises:
+            RuntimeError: If the network is uninitialized or a power flow solution is not available.
         """
         if self.net is None or self.net.res_bus.empty:
             raise RuntimeError("Power flow has not been run yet")
@@ -636,15 +674,18 @@ class SuperGrid:
     
     def get_tie_line_flows(self) -> List[Dict]:
         """
-        Get power flows on all tie-lines
+        Return flow measurements and status for each inter-area tie-line.
         
         Returns:
-            List of dictionaries with tie-line flow data:
-            - name: Tie-line identifier
-            - p_from_mw: Active power flow from sending end
-            - p_to_mw: Active power flow to receiving end
-            - loading_percent: Line loading as percentage of thermal limit
-            - is_overloaded: Whether line exceeds thermal limit
+            tie_line_flows (List[Dict]): A list where each dictionary contains metrics for one tie-line:
+                - name: Tie-line identifier (str).
+                - from_bus: Sending-end bus index (int).
+                - to_bus: Receiving-end bus index (int).
+                - p_from_mw: Active power injected at the sending end in MW (float).
+                - p_to_mw: Active power at the receiving end in MW (float).
+                - q_from_mvar: Reactive power injected at the sending end in MVAR (float).
+                - loading_percent: Line loading as a percentage of its thermal limit (float).
+                - is_overloaded: `True` if loading_percent > 100.0, `False` otherwise.
         """
         if self.net is None or self.net.res_line.empty:
             raise RuntimeError("Power flow has not been run yet")
@@ -674,13 +715,26 @@ class SuperGrid:
     
     def get_global_state(self) -> Dict:
         """
-        Get the complete super-grid state (for RL observation)
+        Return an observation dictionary representing the current super-grid state for RL agents.
+        
+        The returned structure includes per-area aggregations, tie-line flows, and system-wide metrics derived from the last solved power flow and current dynamics state.
         
         Returns:
-            Dictionary containing:
-            - areas: State of each area
-            - tie_lines: Flow on each tie-line
-            - global_metrics: System-wide metrics
+            global_state (dict): A dictionary with keys:
+                - "areas": mapping of area id (str) to area state dict (contains generation, load, voltages, counts).
+                - "tie_lines": list of tie-line flow dicts (power, reactive, loading, overload flag).
+                - "global_metrics": dict containing:
+                    - "total_generation_mw": sum of area generation (MW).
+                    - "total_load_mw": sum of area loads (MW).
+                    - "total_losses_mw": generation minus load (MW).
+                    - "system_frequency_hz": current system frequency (Hz).
+                    - "has_voltage_violations": `true` if any area voltage is outside configured limits, `false` otherwise.
+                    - "has_thermal_violations": `true` if any tie-line is overloaded, `false` otherwise.
+                    - "frequency_deviation_hz": deviation from nominal 50.0 Hz.
+                    - "dynamics_enabled": `true` if dynamic simulation is initialized, `false` otherwise.
+        
+        Raises:
+            RuntimeError: If the super-grid network is not initialized.
         """
         if self.net is None:
             raise RuntimeError("Grid not initialized")
@@ -724,11 +778,14 @@ class SuperGrid:
     
     def set_generator_setpoint(self, gen_idx: int, p_mw: float) -> None:
         """
-        Set active power setpoint for a specific generator
+        Set the active power setpoint for a generator, clamping it to the generator's minimum and maximum limits.
         
-        Args:
-            gen_idx: Generator index in the network
-            p_mw: Active power setpoint in MW
+        Parameters:
+            gen_idx (int): Index of the generator in self.net.gen.
+            p_mw (float): Desired active power setpoint in MW.
+        
+        Raises:
+            ValueError: If the specified generator index does not exist in the network.
         """
         if gen_idx not in self.net.gen.index:
             raise ValueError(f"Generator {gen_idx} does not exist")
@@ -776,11 +833,11 @@ class SuperGrid:
     
     def scale_loads(self, area_id: AreaID, scale_factor: float) -> None:
         """
-        Scale all loads in an area by a factor
+        Scale all loads in the specified area by a multiplicative factor.
         
-        Args:
-            area_id: Which area to scale
-            scale_factor: Multiplication factor (1.0 = no change)
+        Parameters:
+            area_id (AreaID): The area whose loads will be scaled.
+            scale_factor (float): Multiplicative factor applied to each load's active power (`p_mw`) and reactive power (`q_mvar`) (1.0 = no change).
         """
         area = self.areas[area_id]
         
@@ -793,10 +850,17 @@ class SuperGrid:
             
     def get_controllable_generators(self) -> Dict[str, List[Dict]]:
         """
-        Get information about all controllable generators organized by area
+        Collects controllable generator metadata grouped by area.
         
         Returns:
-            Dictionary mapping area IDs to lists of generator info
+            dict: Mapping from area ID string to a list of generator info dictionaries. Each generator dictionary contains:
+                - `index` (int): generator table index
+                - `bus` (int): associated bus index
+                - `p_mw` (float): current active power output in MW
+                - `max_p_mw` (float): maximum active power in MW
+                - `min_p_mw` (float): minimum active power in MW
+                - `vm_pu` (float): voltage setpoint in per unit
+                - `in_service` (bool): whether the generator is in service
         """
         result = {}
         
@@ -826,6 +890,12 @@ class SuperGrid:
         self._build_supergrid()
         
     def __repr__(self) -> str:
+        """
+        Provide a concise string describing the SuperGrid's initialization state and key component counts.
+        
+        Returns:
+            A string describing whether the super-grid is initialized. If initialized, includes the number of buses, generators, lines, and configured tie-lines; otherwise returns "SuperGrid(not initialized)".
+        """
         if self.net is None:
             return "SuperGrid(not initialized)"
         return (f"SuperGrid(buses={len(self.net.bus)}, "

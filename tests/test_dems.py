@@ -15,25 +15,45 @@ from src.agent import DEMSEnvironment, RLAgent
 
 @pytest.fixture
 def grid():
-    """Create DEMSGrid instance"""
+    """
+    Create a new DEMSGrid test fixture.
+    
+    Returns:
+        DEMSGrid: A fresh DEMSGrid instance for use in tests.
+    """
     return DEMSGrid()
 
 
 @pytest.fixture
 def energy_manager():
-    """Create EnergyManager instance"""
+    """
+    Provide a configured EnergyManager fixture for tests.
+    
+    Returns:
+        EnergyManager: an EnergyManager instance configured with grid_size=10 and storage_capacity=1000.0.
+    """
     return EnergyManager(grid_size=10, storage_capacity=1000.0)
 
 
 @pytest.fixture
 def grid_manager():
-    """Create GridManager instance"""
+    """
+    Provide a GridManager configured for tests with ten nodes.
+    
+    Returns:
+        GridManager: A GridManager instance with num_nodes set to 10.
+    """
     return GridManager(num_nodes=10)
 
 
 @pytest.fixture
 def environment():
-    """Create DEMSEnvironment instance"""
+    """
+    Create a DEMSEnvironment configured for the test suite.
+    
+    Returns:
+        DEMSEnvironment: An environment instance with num_nodes=10 and max_steps=100.
+    """
     return DEMSEnvironment(num_nodes=10, max_steps=100)
 
 
@@ -43,7 +63,11 @@ class TestGrid:
     """SuperGrid and power flow tests"""
     
     def test_grid_initialization(self, grid):
-        """Test 117-bus SuperGrid initialization"""
+        """
+        Verify the DEMSGrid creates a SuperGrid and that the network contains 117 buses.
+        
+        Asserts that the grid's supergrid is initialized and that len(grid.supergrid.net.bus) == 117.
+        """
         assert grid.supergrid is not None
         assert len(grid.supergrid.net.bus) == 117
         
@@ -79,7 +103,12 @@ class TestDynamics:
     """Dynamic simulation tests"""
     
     def test_dynamics_initialization(self, grid):
-        """Test dynamics module initializes"""
+        """
+        Verify dynamics are initialized and the system frequency is set to 50.0 Hz.
+        
+        Parameters:
+            grid: DEMSGrid test fixture used to run power flow and initialize dynamics.
+        """
         grid.run_power_flow()
         grid.supergrid.initialize_dynamics()
         
@@ -139,7 +168,12 @@ class TestRLAgent:
     """RL Agent tests"""
     
     def test_agent_initialization(self, environment):
-        """Test agent initializes with environment"""
+        """
+        Verify that an RLAgent can be constructed with the provided environment and exposes observation and action spaces.
+        
+        Parameters:
+            environment (DEMSEnvironment): The environment fixture used to initialize the agent.
+        """
         agent = RLAgent(env=environment)
         assert agent.observation_space is not None
         assert agent.action_space is not None
@@ -151,13 +185,21 @@ class TestCore:
     """Core module tests"""
     
     def test_energy_manager(self, energy_manager):
-        """Test EnergyManager basic functionality"""
+        """
+        Verify the EnergyManager exposes a storage level and that it is initialized to 500.0.
+        
+        Asserts that the current state contains the key "storage_level" and that its value equals 500.0.
+        """
         state = energy_manager.get_current_state()
         assert "storage_level" in state
         assert state["storage_level"] == 500.0
         
     def test_grid_manager(self, grid_manager):
-        """Test GridManager basic functionality"""
+        """
+        Verify that GridManager reports its configured node count and includes 'num_nodes' in its exported grid state.
+        
+        Asserts that `num_nodes` equals 10 and that the dictionary returned by `get_grid_state()` contains the key "num_nodes".
+        """
         assert grid_manager.num_nodes == 10
         state = grid_manager.get_grid_state()
         assert "num_nodes" in state
@@ -185,7 +227,11 @@ class TestIntegration:
         assert total_der > 0
         
     def test_multiple_power_flows(self):
-        """Test repeated power flow runs"""
+        """
+        Verifies that consecutive executions of the grid power flow converge on each of three runs.
+        
+        Asserts failure if any run does not converge.
+        """
         grid = DEMSGrid()
         
         for i in range(3):
