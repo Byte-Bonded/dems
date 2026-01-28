@@ -14,13 +14,11 @@ import logging
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from pathlib import Path
 import json
 
 from src.grid import DEMSGrid
-from src.simulation.supergrid import SuperGridConfig, AreaID
+from src.simulation.supergrid import SuperGridConfig
 from src.simulation.power_flow import PowerFlowResult
-from src.simulation.der import DERType
 
 # Configure logging
 def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> logging.Logger:
@@ -303,7 +301,7 @@ class GridOrchestrator:
             result = self.run_single_power_flow(verbose=False)
             
             # Get state
-            state = self.grid.get_state()
+            self.grid.get_state()
             
             # Create snapshot
             snapshot = {
@@ -420,7 +418,7 @@ def main():
         orchestrator.logger.info("\n" + "=" * 80)
         orchestrator.logger.info("STEP 2: GRID STATE ANALYSIS")
         orchestrator.logger.info("=" * 80)
-        state = orchestrator.get_and_log_state()
+        orchestrator.get_and_log_state()
         
         # 3. Area-by-area analysis
         orchestrator.logger.info("\n" + "=" * 80)
@@ -438,7 +436,7 @@ def main():
         orchestrator.logger.info("\n" + "=" * 80)
         orchestrator.logger.info("STEP 5: TIME-SERIES SIMULATION")
         orchestrator.logger.info("=" * 80)
-        snapshots = orchestrator.run_time_series_simulation(num_steps=5, step_duration="1 hour")
+        orchestrator.run_time_series_simulation(num_steps=5, step_duration="1 hour")
         
         # 6. Save history
         orchestrator.save_history()

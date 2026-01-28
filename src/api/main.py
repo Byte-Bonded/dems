@@ -8,8 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_wsgi_app
 from prometheus_client.core import CollectorRegistry
 import logging
+import threading
 
-from src.core import EnergyManager, GridMonitor
+from src.core import EnergyManager
 from src.agent import RLAgent, DEMSEnvironment
 from src.grid import DEMSGrid
 
@@ -40,31 +41,43 @@ energy_manager = EnergyManager(grid_size=10, storage_capacity=1000.0)
 _grid: DEMSGrid = None
 _environment: DEMSEnvironment = None
 _agent: RLAgent = None
+_grid_lock = threading.Lock()
+_env_lock = threading.Lock()
+_agent_lock = threading.Lock()
 
 
 def get_grid() -> DEMSGrid:
-    """Get or create the DEMS grid (lazy initialization)"""
+    """Get or create the DEMS grid (lazy initialization with thread safety)"""
     global _grid
     if _grid is None:
-        logger.info("Initializing DEMSGrid...")
-        _grid = DEMSGrid()
-        _grid.run_power_flow()
+        with _grid_lock:
+            # Double-check pattern to avoid race condition
+            if _grid is None:
+                logger.info("Initializing DEMSGrid...")
+                _grid = DEMSGrid()
+                _grid.run_power_flow()
     return _grid
 
 
 def get_environment() -> DEMSEnvironment:
-    """Get or create the RL environment (lazy initialization)"""
+    """Get or create the RL environment (lazy initialization with thread safety)"""
     global _environment
     if _environment is None:
-        _environment = DEMSEnvironment(num_nodes=10, max_steps=1000)
+        with _env_lock:
+            # Double-check pattern to avoid race condition
+            if _environment is None:
+                _environment = DEMSEnvironment(num_nodes=10, max_steps=1000)
     return _environment
 
 
 def get_agent() -> RLAgent:
-    """Get or create the RL agent (lazy initialization)"""
+    """Get or create the RL agent (lazy initialization with thread safety)"""
     global _agent
     if _agent is None:
-        _agent = RLAgent(env=get_environment())
+        with _agent_lock:
+            # Double-check pattern to avoid race condition
+            if _agent is None:
+                _agent = RLAgent(env=get_environment())
     return _agent
 
 

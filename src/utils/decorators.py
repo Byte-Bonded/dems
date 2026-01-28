@@ -62,16 +62,22 @@ def validate_converged(func: Callable[P, T]) -> Callable[P, T]:
     """
     @wraps(func)
     def wrapper(self: Any, *args: P.args, **kwargs: P.kwargs) -> T:
-        if self._last_result is None:
+        if not hasattr(self, "_last_result"):
+            raise RuntimeError(
+                f"{func.__name__} requires 'self' to define a '_last_result' "
+                "attribute with 'converged' and 'error_message' properties."
+            )
+        last_result = self._last_result
+        if last_result is None:
             raise RuntimeError(
                 f"{func.__name__} called before running power flow. "
                 "Call run_power_flow() first."
             )
-        elif not self._last_result.converged:
+        if not last_result.converged:
             raise RuntimeError(
                 f"{func.__name__} called with non-converged power flow. "
-                f"Last power flow converged={self._last_result.converged}, "
-                f"error={self._last_result.error_message}"
+                f"Last power flow converged={last_result.converged}, "
+                f"error={last_result.error_message}"
             )
         return func(self, *args, **kwargs)
     return wrapper

@@ -12,7 +12,7 @@ Note: This is a monitoring layer - use DEMSGrid for actual grid control.
 """
 
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 import logging
@@ -370,3 +370,15 @@ class GridManager(GridMonitor):
             "The num_nodes parameter is ignored - monitoring is based on SuperGrid."
         )
         super().__init__(**kwargs)
+        self.num_nodes = num_nodes  # Store for backward compatibility
+    
+    def get_grid_state(self) -> Dict[str, Any]:
+        """
+        Get grid state including num_nodes for backward compatibility.
+        
+        Returns:
+            Dict containing grid state with num_nodes key
+        """
+        state = self.get_current_state()
+        state["num_nodes"] = self.num_nodes
+        return state
