@@ -156,7 +156,7 @@ class DERManager:
     
     def __init__(self, net: pp.pandapowerNet):
         """
-        Initialize DER Manager
+        Create a DERManager bound to a pandapower network and initialize internal DER registries.
         
         Args:
             net: Pandapower network to add DER to
@@ -184,18 +184,18 @@ class DERManager:
         efficiency: float = 0.20
     ) -> int:
         """
-        Add solar PV system to a bus
+        Register a solar PV DER at the specified bus and add a controllable static generator to the pandapower network.
         
-        Args:
-            bus: Bus index
-            capacity_mw: Peak capacity in MW
-            name: Identifier for this PV system
-            area_id: Area identifier
-            panel_area_m2: Total panel area
-            efficiency: Panel efficiency (0-1)
-            
+        Parameters:
+            bus (int): Target bus index in the pandapower network.
+            capacity_mw (float): Peak AC capacity of the PV installation in megawatts.
+            name (str): Unique identifier for this PV system.
+            area_id (str): Identifier for the geographic or operational area.
+            panel_area_m2 (float): Total photovoltaic panel area in square meters.
+            efficiency (float): Panel conversion efficiency as a fraction between 0 and 1.
+        
         Returns:
-            Index of created static generator
+            int: Index of the created static generator element in the pandapower network.
         """
         spec = DERSpec(
             der_type=DERType.SOLAR_PV,
@@ -233,17 +233,20 @@ class DERManager:
         num_turbines: int = 1
     ) -> int:
         """
-        Add wind turbine(s) to a bus
+        Register a wind farm and add a controllable wind static generator to the pandapower network.
         
-        Args:
-            bus: Bus index
-            capacity_mw: Total capacity in MW
-            name: Identifier for this wind farm
-            area_id: Area identifier
-            num_turbines: Number of turbines
-            
+        Parameters:
+            bus (int): Index of the bus where the wind farm is placed.
+            capacity_mw (float): Total installed capacity of the wind farm in MW.
+            name (str): Unique identifier for this wind farm.
+            area_id (str): Area or region identifier for grouping/metadata.
+            num_turbines (int): Number of turbines in the wind farm; used to compute per-turbine capacity.
+        
+        Notes:
+            The created generator is initialized with output set to 40% of total capacity.
+        
         Returns:
-            Index of created static generator
+            int: Index of the created static generator element in the pandapower network.
         """
         spec = DERSpec(
             der_type=DERType.WIND,
@@ -282,18 +285,18 @@ class DERManager:
         initial_soc: float = 0.5
     ) -> int:
         """
-        Add battery energy storage system (BESS)
+        Register a battery energy storage system (BESS) and add a controllable storage element to the pandapower network.
         
-        Args:
-            bus: Bus index
-            power_mw: Maximum charge/discharge rate (MW)
-            energy_mwh: Energy capacity (MWh)
-            name: Identifier for this battery
-            area_id: Area identifier
-            initial_soc: Initial state of charge (0-1)
-            
+        Parameters:
+            bus (int): Bus index where the battery is connected.
+            power_mw (float): Maximum charge/discharge power in MW.
+            energy_mwh (float): Energy capacity in MWh.
+            name (str): Unique identifier for the battery.
+            area_id (str): Area identifier for grouping or reporting.
+            initial_soc (float): Initial state of charge as a fraction between 0 and 1.
+        
         Returns:
-            Index of created storage element
+            int: Index of the created storage element.
         """
         spec = DERSpec(
             der_type=DERType.BESS,
@@ -340,19 +343,19 @@ class DERManager:
         smart_charging_enabled: bool = True
     ) -> int:
         """
-        Add EV charging station
+        Register an EV charging station and create a controllable pandapower load representing its initial demand.
         
-        Args:
-            bus: Bus index
-            num_chargers: Number of charging points
-            charger_power_kw: Power per charger (kW)
-            name: Identifier for this station
-            area_id: Area identifier
-            ev_battery_capacity_kwh: Average EV battery size (kWh)
-            smart_charging_enabled: Enable smart/flexible charging
-            
+        Parameters:
+            bus (int): Network bus index where the station is connected.
+            num_chargers (int): Number of charging points at the station.
+            charger_power_kw (float): Rated power per charger in kilowatts.
+            name (str): Unique identifier for the station.
+            area_id (str): Geographic or logical area identifier for grouping.
+            ev_battery_capacity_kwh (float): Typical EV battery capacity used for modeling (kWh).
+            smart_charging_enabled (bool): If true, enables smart charging behavior that can be used to reduce load during control actions.
+        
         Returns:
-            Index of created load element
+            load_index (int): Index of the created pandapower load element.
         """
         capacity_mw = (num_chargers * charger_power_kw) / 1000.0
         
@@ -398,19 +401,21 @@ class DERManager:
         incentive_price_per_mwh: float = 100.0
     ) -> int:
         """
-        Add demand response program
+        Register a demand response program and create a controllable load at its baseline demand.
         
-        Args:
-            bus: Bus index
-            baseline_load_mw: Normal load level (MW)
-            curtailable_fraction: Fraction that can be curtailed (0-1)
-            name: Identifier for this DR program
-            area_id: Area identifier
-            response_time_minutes: Time to respond to signal
-            incentive_price_per_mwh: Payment for curtailment ($/MWh)
-            
+        Creates a DERSpec for the demand response program and adds a controllable pandapower load initialized to the provided baseline load.
+        
+        Parameters:
+            bus (int): Pandapower bus index where the DR resource is connected.
+            baseline_load_mw (float): Baseline load in megawatts that can be reduced.
+            curtailable_fraction (float): Fraction of the baseline load that is curtailable (0 to 1).
+            name (str): Unique identifier for this DR program.
+            area_id (str): Geographic or aggregation area identifier.
+            response_time_minutes (float): Expected DR response time in minutes.
+            incentive_price_per_mwh (float): Incentive payment for curtailed energy in $/MWh.
+        
         Returns:
-            Index of created load element
+            int: Index of the created pandapower load element.
         """
         capacity_mw = baseline_load_mw * curtailable_fraction
         
@@ -444,7 +449,7 @@ class DERManager:
         
     def set_solar_output(self, name: str, irradiance_w_m2: float) -> None:
         """
-        Update solar PV output based on irradiance
+        Set the active power of a named solar PV DER based on irradiance and update the network element.
         
         Args:
             name: PV system name
@@ -488,7 +493,7 @@ class DERManager:
         
     def set_wind_output(self, name: str, wind_speed_m_s: float) -> None:
         """
-        Update wind turbine output based on wind speed
+        Set the wind turbine's active power output based on the provided wind speed.
         
         Args:
             name: Wind farm name
@@ -535,7 +540,7 @@ class DERManager:
         
     def set_battery_power(self, name: str, power_mw: float) -> None:
         """
-        Set battery charge/discharge power
+        Set the battery's active power setpoint (positive values discharge the battery, negative values charge it).
         
         Args:
             name: Battery name
@@ -582,7 +587,7 @@ class DERManager:
         
     def set_ev_charging_load(self, name: str, utilization: float, smart_override: bool = False) -> None:
         """
-        Set EV charging station load
+        Adjust the active charging load of an EV charging station according to utilization and optional smart-charge reduction.
         
         Args:
             name: EV station name
@@ -626,13 +631,14 @@ class DERManager:
         
     def set_demand_response_curtailment(self, name: str, curtailment_fraction: float) -> None:
         """
-        Activate demand response curtailment
+        Set the demand response curtailment for a named DR program.
         
-        Args:
-            name: DR program name
-            curtailment_fraction: Fraction of curtailable load to reduce (0-1)
-                                 0 = no curtailment (baseline load)
-                                 1 = maximum curtailment
+        Parameters:
+            name (str): Name of the demand response program.
+            curtailment_fraction (float): Fraction of curtailable load to reduce (0 to 1). Values outside this range are clamped.
+        
+        Notes:
+            Updates the associated pandapower load: sets active power to baseline minus the curtailed amount and reactive power to 20% of the resulting active power.
         """
         spec = self._get_spec(name)
         if spec.der_type != DERType.DEMAND_RESPONSE:
@@ -654,10 +660,10 @@ class DERManager:
         
     def update_ev_charging_by_hour(self, hour: int) -> None:
         """
-        Update all EV charging stations based on time of day
+        Apply a predefined hourly utilization profile to all EV charging DERs and update each station's target utilization.
         
-        Args:
-            hour: Hour of day (0-23)
+        Parameters:
+            hour (int): Hour of day; values are interpreted modulo 24 (0–23).
         """
         # Typical EV charging profile:
         # - Night (00-06): 0.2 (home charging)
@@ -680,7 +686,19 @@ class DERManager:
                 self.set_ev_charging_load(spec.name, utilization)
         
     def get_der_state(self, name: str) -> DERState:
-        """Get current state of a DER unit"""
+        """
+        Retrieve the live state for a named DER in the network.
+        
+        Parameters:
+            name (str): Unique name of the DER to query.
+        
+        Returns:
+            DERState: Current measured and derived state for the DER. Fields populated depend on DER type:
+                - BESS: includes `current_output_mw`, `soc`, and `charging`.
+                - EV_CHARGING: includes `current_output_mw`, `utilization`, and `num_active_chargers`.
+                - DEMAND_RESPONSE: includes `current_output_mw`, `curtailment_level`, and `curtailed_load_mw`.
+                - Solar/Wind (generation types): includes `current_output_mw` and `availability`.
+        """
         spec = self._get_spec(name)
         idx = self.der_indices[name]
         
@@ -735,11 +753,27 @@ class DERManager:
             )
             
     def get_all_der_states(self) -> List[DERState]:
-        """Get states of all DER units"""
+        """
+        Retrieve the current state for every registered DER.
+        
+        Returns:
+            states (List[DERState]): A list containing one DERState for each registered DER.
+        """
         return [self.get_der_state(name) for name in self.der_indices.keys()]
         
     def _get_spec(self, name: str) -> DERSpec:
-        """Get DER specification by name"""
+        """
+        Retrieve the DERSpec for a DER with the given name.
+        
+        Parameters:
+            name (str): Unique DER name to look up.
+        
+        Returns:
+            DERSpec: The specification object for the matching DER.
+        
+        Raises:
+            ValueError: If no DER with the given name is found.
+        """
         for spec in self.der_specs:
             if spec.name == name:
                 return spec
@@ -747,10 +781,12 @@ class DERManager:
         
     def update_battery_soc(self, timestep_hours: float = 1.0) -> None:
         """
-        Update state of charge for all batteries based on current power
+        Advance battery states of charge (SOC) for all registered BESS units and synchronize them to the pandapower storage table.
         
-        Args:
-            timestep_hours: Time elapsed in hours
+        For each battery, reads the current power (positive = discharge, negative = charging), converts it to energy over the given timestep, updates the internal SOC map (clamped between 0 and 1), and writes the SOC back to the pandapower storage row as percent.
+        
+        Parameters:
+            timestep_hours (float): Duration over which power is integrated, in hours (default 1.0).
         """
         for name, idx in self.der_indices.items():
             spec = self._get_spec(name)
@@ -768,10 +804,10 @@ class DERManager:
     
     def get_total_generation(self) -> float:
         """
-        Get total power generation from all DER units
+        Return the net active generation from all DERs in MW.
         
         Returns:
-            Total power in MW (positive = generation)
+            float: Net generation in MW; positive values indicate net generation. Battery discharge is counted as generation (discharging storage p_mw increases the returned total).
         """
         total = 0.0
         for name, idx in self.der_indices.items():
@@ -786,15 +822,28 @@ class DERManager:
     
     def get_status(self) -> Dict[str, Dict[str, float]]:
         """
-        Get status summary of all DER resources by type
+        Return aggregated status metrics for all distributed energy resources grouped by type.
+        
+        The returned dictionary contains per-type summaries with capacity, current output/power, and unit counts; battery entries include average state of charge, and demand response entries include available and currently curtailed MW.
         
         Returns:
-            Dictionary with status for each DER type:
-            - solar: {total_capacity_mw, current_output_mw, unit_count}
-            - wind: {total_capacity_mw, current_output_mw, unit_count}
-            - battery: {capacity_mwh, current_soc_pct, power_mw, unit_count}
-            - ev_charger: {max_power_mw, current_power_mw, unit_count}
-            - demand_response: {available_mw, curtailed_mw, unit_count}
+            dict: Mapping of DER type to metrics:
+                - "solar": {"total_capacity_mw": total installed solar capacity in MW,
+                            "current_output_mw": sum of current solar output in MW,
+                            "unit_count": number of solar units}
+                - "wind": {"total_capacity_mw": total installed wind capacity in MW,
+                           "current_output_mw": sum of current wind output in MW,
+                           "unit_count": number of wind units}
+                - "battery": {"capacity_mwh": total battery energy capacity in MWh,
+                              "current_soc_pct": average state of charge across batteries in percent,
+                              "power_mw": sum of battery active power (positive = discharge) in MW,
+                              "unit_count": number of battery units}
+                - "ev_charger": {"max_power_mw": aggregated maximum EV charger power in MW,
+                                 "current_power_mw": sum of current EV charging load in MW,
+                                 "unit_count": number of EV charging units}
+                - "demand_response": {"available_mw": total curtailable capacity in MW,
+                                      "curtailed_mw": total currently curtailed load in MW,
+                                      "unit_count": number of demand response units}
         """
         status = {
             "solar": {"total_capacity_mw": 0.0, "current_output_mw": 0.0, "unit_count": 0},
@@ -851,6 +900,12 @@ class DERManager:
         return status
                 
     def __repr__(self) -> str:
+        """
+        Provide a concise textual summary of managed DER units grouped by type.
+        
+        Returns:
+            repr_str (str): A string like "DERManager(3 SOLAR_PV, 2 WIND, ...)" listing the count of DERs for each DERType.
+        """
         by_type = {}
         for spec in self.der_specs:
             by_type[spec.der_type.value] = by_type.get(spec.der_type.value, 0) + 1

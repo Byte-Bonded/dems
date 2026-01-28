@@ -81,7 +81,12 @@ class PowerFlowResult:
     
     @property
     def is_secure(self) -> bool:
-        """Check if system is in secure operating state"""
+        """
+        Determine whether the power flow result indicates a secure operating state.
+        
+        Returns:
+            True if the run converged and there are zero voltage violations and zero line overloads, False otherwise.
+        """
         return (self.converged and 
                 self.num_voltage_violations == 0 and 
                 self.num_line_overloads == 0 and
@@ -101,10 +106,12 @@ class PowerFlowRunner:
     
     def __init__(self, config: Optional[PowerFlowConfig] = None):
         """
-        Initialize the power flow runner
+        Create a PowerFlowRunner with the provided configuration.
         
-        Args:
-            config: Power flow configuration
+        If no config is given, a default PowerFlowConfig is created. Initializes internal state including last_result set to None.
+        
+        Parameters:
+            config (Optional[PowerFlowConfig]): Configuration for power flow execution; defaults to a new PowerFlowConfig when omitted.
         """
         self.config = config or PowerFlowConfig()
         self.last_result: Optional[PowerFlowResult] = None
@@ -116,15 +123,17 @@ class PowerFlowRunner:
         verbose: bool = False,
     ) -> PowerFlowResult:
         """
-        Execute power flow calculation
+        Run a power flow on the given pandapower network using the configured or specified algorithm.
         
-        Args:
-            net: Pandapower network
-            algorithm: Override default algorithm
-            verbose: Print detailed output
-            
+        Parameters:
+            net: Pandapower network to solve.
+            algorithm: Optional algorithm to override the runner's configured algorithm.
+            verbose: If true, print a human-readable summary of the result.
+        
         Returns:
-            PowerFlowResult with convergence status and system metrics
+            PowerFlowResult: Result populated with convergence status, iteration count, elapsed time (ms),
+            total generation/load/losses (MW and MVAr), voltage statistics (min/max/avg pu),
+            counts of voltage and thermal violations, optional error message, and raw bus/line/gen result tables.
         """
         algo = algorithm or self.config.algorithm
         
@@ -184,15 +193,16 @@ class PowerFlowRunner:
         contingency_elements: List[tuple],
     ) -> List[PowerFlowResult]:
         """
-        Run power flow for N-1 contingency analysis
+        Perform N-1 contingency analysis by disabling specified network elements and running power flow for each case.
         
-        Args:
-            net: Pandapower network
-            contingency_elements: List of (element_type, index) tuples
-                                  e.g., [("line", 5), ("gen", 2)]
-                                  
+        The returned list includes the base case as the first entry; each subsequent entry is the result after taking the corresponding element out of service. Each contingency run restores the element's original in_service state after execution.
+        
+        Parameters:
+            net (pp.pandapowerNet): The pandapower network to analyze.
+            contingency_elements (List[tuple]): Sequence of (element_type, index) tuples identifying elements to remove, e.g. [("line", 5), ("gen", 2)].
+        
         Returns:
-            List of PowerFlowResult for each contingency
+            results (List[PowerFlowResult]): List of PowerFlowResult objects where the first element is the base case and each following element corresponds to one contingency.
         """
         results = []
         
@@ -228,7 +238,19 @@ class PowerFlowRunner:
         elapsed_time: float,
         error_msg: Optional[str],
     ) -> PowerFlowResult:
-        """Extract comprehensive results from completed power flow"""
+        """
+        Builds a PowerFlowResult populated from a pandapower network after a completed power flow.
+        
+        Parameters:
+            net (pp.pandapowerNet): The pandapower network containing result tables (res_bus, res_gen, res_load, res_ext_grid, res_line, res_trafo).
+            converged (bool): Whether the power flow converged.
+            iterations (int): Number of iterations performed.
+            elapsed_time (float): Elapsed time in milliseconds for the power flow execution.
+            error_msg (Optional[str]): Error or warning message produced during the run, if any.
+        
+        Returns:
+            PowerFlowResult: A result object containing convergence metadata and, when available, totals for generation (MW/MVAr), load (MW/MVAr), losses (MW/MVAr), voltage statistics (min/max/avg in pu), and counts of voltage, line, and transformer violations.
+        """
         
         result = PowerFlowResult(
             converged=converged,
@@ -295,15 +317,36 @@ class PowerFlowRunner:
         print(f"{'='*50}\n")
         
     def get_bus_results_dataframe(self, net: pp.pandapowerNet):
-        """Get bus results as a pandas DataFrame"""
+        """
+        Return the bus results DataFrame from a pandapower network.
+        
+        Parameters:
+            net (pp.pandapowerNet): The pandapower network containing result tables.
+        
+        Returns:
+            pandas.DataFrame or None: A copy of `net.res_bus` if it contains rows, `None` if there are no bus results.
+        """
         return net.res_bus.copy() if not net.res_bus.empty else None
         
     def get_line_results_dataframe(self, net: pp.pandapowerNet):
-        """Get line results as a pandas DataFrame"""
+        """
+        Return the line results DataFrame from the pandapower network.
+        
+        Returns:
+            A copy of net.res_line as a pandas DataFrame, or `None` if no line results are present.
+        """
         return net.res_line.copy() if not net.res_line.empty else None
         
     def get_gen_results_dataframe(self, net: pp.pandapowerNet):
-        """Get generator results as a pandas DataFrame"""
+        """
+        Return a copy of the generator results table for the given pandapower network.
+        
+        Parameters:
+            net (pp.pandapowerNet): The pandapower network from which to retrieve generator results.
+        
+        Returns:
+            pandas.DataFrame or None: A copy of net.res_gen if it contains results, otherwise None.
+        """
         return net.res_gen.copy() if not net.res_gen.empty else None
 
 
@@ -315,17 +358,17 @@ def run_time_series_power_flow(
     runner: Optional[PowerFlowRunner] = None,
 ) -> List[PowerFlowResult]:
     """
-    Run time-series power flow simulation
+    Perform time-series power flow analysis on a network with time-varying load and generation.
     
-    Args:
-        net: Pandapower network
-        load_profiles: Array of shape (timesteps, num_loads) with load multipliers
-        gen_profiles: Array of shape (timesteps, num_gens) with generation setpoints
-        timesteps: Number of timesteps to simulate
-        runner: PowerFlowRunner instance (creates default if None)
-        
+    Parameters:
+        net: Pandapower network to simulate.
+        load_profiles: Array of shape (timesteps, num_loads) containing load multipliers for each load at each timestep.
+        gen_profiles: Array of shape (timesteps, num_gens) containing generation setpoints in MW for each generator at each timestep.
+        timesteps: Number of timesteps to simulate.
+        runner: PowerFlowRunner instance. If None, a default runner is created.
+    
     Returns:
-        List of PowerFlowResult for each timestep
+        List of PowerFlowResult objects, one for each timestep.
     """
     if runner is None:
         runner = PowerFlowRunner()
@@ -363,13 +406,13 @@ def run_time_series_power_flow(
 
 def quick_power_flow(net: pp.pandapowerNet) -> bool:
     """
-    Quick power flow check - just returns convergence status
+    Performs a short power flow on the given pandapower network and reports convergence.
     
-    Args:
-        net: Pandapower network
-        
+    Parameters:
+        net: pandapower network to solve.
+    
     Returns:
-        True if converged, False otherwise
+        True if the network converged, False otherwise.
     """
     try:
         pp.runpp(net, max_iteration=30)

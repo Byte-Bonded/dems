@@ -45,7 +45,15 @@ class TieLineConfig:
     emergency_rating_mva: float = 720.0  # Short-term overload limit
     
     def get_max_current_ka(self, voltage_kv: float = 345.0) -> float:
-        """Calculate maximum current based on MVA rating and voltage"""
+        """
+        Return the maximum continuous current for the tie-line at a specified line-to-line voltage.
+        
+        Parameters:
+            voltage_kv (float): Line-to-line voltage in kilovolts used to compute the current (default 345.0).
+        
+        Returns:
+            max_current_ka (float): Maximum continuous current in kiloamperes corresponding to the tie-line's MVA rating at the given voltage.
+        """
         return self.rating_mva / (voltage_kv * np.sqrt(3))
 
 
@@ -120,16 +128,16 @@ def create_tie_lines(
     voltage_kv: float = 345.0,
 ) -> List[int]:
     """
-    Create tie-lines in a pandapower network
+    Add tie-lines to a pandapower network from the provided TieLineConfig entries.
     
-    Args:
-        net: The pandapower network to add tie-lines to
-        tie_line_configs: List of tie-line configurations
-        area_offsets: Dictionary mapping area IDs to bus offsets {"A": 0, "B": 39, "C": 78}
-        voltage_kv: Nominal voltage for current calculation
-        
+    Parameters:
+        net (pp.pandapowerNet): The pandapower network to modify.
+        tie_line_configs (List[TieLineConfig]): Configurations describing each tie-line to create.
+        area_offsets (dict): Mapping from area ID to bus index offset (e.g., {"A": 0, "B": 39, "C": 78}) used to convert local bus indices to global bus indices.
+        voltage_kv (float): Nominal line-to-line voltage in kV used to compute each line's maximum current (default 345.0).
+    
     Returns:
-        List of created line indices
+        List[int]: List of created pandapower line indices.
     """
     created_indices = []
     
@@ -161,18 +169,17 @@ def get_tie_line_transfer_limits(
     configs: List[TieLineConfig],
 ) -> dict:
     """
-    Calculate aggregate transfer limits between area pairs
+    Aggregate transfer limits by inter-area pair from a list of tie-line configurations.
     
-    Args:
-        configs: List of tie-line configurations
-        
+    Area pair keys are canonicalized by alphabetical order (e.g., "A-B"). Each pair maps to a dictionary with summed thermal ratings in both directions.
+    
+    Parameters:
+        configs (List[TieLineConfig]): Tie-line configurations to aggregate.
+    
     Returns:
-        Dictionary with transfer limits:
-        {
-            "A-B": {"forward_mva": 1100, "reverse_mva": 1100},
-            "B-C": {"forward_mva": 1150, "reverse_mva": 1150},
-            "A-C": {"forward_mva": 850, "reverse_mva": 850},
-        }
+        dict: Mapping from area-pair string to a dict with keys:
+            - "forward_mva" (float): Sum of rating_mva for lines in that area pair.
+            - "reverse_mva" (float): Same as forward_mva for AC tie-lines.
     """
     limits = {}
     
@@ -205,12 +212,22 @@ class TieLineStatus:
     
     @property
     def is_critical(self) -> bool:
-        """Check if line is approaching thermal limit (>80%)"""
+        """
+        Indicates whether the tie-line's loading exceeds 80% of its thermal rating.
+        
+        Returns:
+            bool: `true` if `loading_percent` is greater than 80.0, `false` otherwise.
+        """
         return self.loading_percent > 80.0
     
     @property
     def margin_mw(self) -> float:
-        """Approximate remaining transfer margin in MW"""
+        """
+        Estimate the remaining transferable capacity of the tie-line in megawatts.
+        
+        Returns:
+            float: Remaining transfer margin in MW calculated from current active flow and loading percentage; returns 0.0 if loading_percent is greater than or equal to 100 or less than or equal to 0.01.
+        """
         # Simplified calculation assuming constant power factor
         if self.loading_percent >= 100:
             return 0.0
@@ -225,17 +242,23 @@ def analyze_transfer_capability(
     tie_line_indices: List[int],
 ) -> dict:
     """
-    Analyze the current transfer capability of tie-lines
+    Evaluate current transfer capability of specified tie-lines using power-flow results.
     
-    Args:
-        net: Pandapower network with completed power flow results
-        tie_line_indices: Indices of tie-lines in the network
-        
+    Parameters:
+        net (pp.pandapowerNet): Pandapower network containing completed power-flow results; `net.res_line` must be populated.
+        tie_line_indices (List[int]): Indices of tie-lines in `net.line` to include in the analysis.
+    
     Returns:
-        Analysis results including:
-        - Individual line status
-        - Aggregate interface flows
-        - System-wide transfer margins
+        dict: Analysis summary with the following keys:
+            - individual_status (List[TieLineStatus]): Per-line status objects for each tie-line.
+            - total_transfer_mw (float): Sum of the absolute active power flows (MW) on the provided tie-lines.
+            - max_loading_percent (float): Maximum loading percent among the provided tie-lines.
+            - num_overloaded (int): Count of tie-lines with loading percent greater than 100.
+            - num_critical (int): Count of tie-lines considered critical (loading percent > 80).
+            - system_secure (bool): True if no tie-lines are overloaded, False otherwise.
+    
+    Raises:
+        RuntimeError: If power-flow results are not available (i.e., `net.res_line` is empty).
     """
     if net.res_line.empty:
         raise RuntimeError("Power flow results not available")

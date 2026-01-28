@@ -210,11 +210,13 @@ class DEMSEnvironment(gym.Env):
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """
-        Execute one step in the DEMS environment
+        Advance the environment one timestep using the provided per-node control action.
         
-        Args:
-            action: Control action for charge/discharge per node [0, 1]
-            
+        Validates and applies the action, updates the environment dynamics, accumulates reward, and prepares diagnostic info for the step.
+        
+        Parameters:
+            action (np.ndarray): Per-node control values in [0, 1] representing charge/discharge commands.
+        
         Returns:
             observation: Current state observation
             reward: Step reward
@@ -223,7 +225,7 @@ class DEMSEnvironment(gym.Env):
             info: Additional information (metrics, validated action, etc.)
             
         Raises:
-            ValueError: If action shape is invalid
+            ValueError: If `action` does not have the required shape or contains invalid values.
         """
         # Validate action at start of step
         try:
@@ -296,7 +298,9 @@ class DEMSEnvironment(gym.Env):
         return self._get_obs(), info
 
     def render(self, mode: str = "human") -> None:
-        """Render environment state"""
+        """
+        Print the current simulation step and accumulated episode reward.
+        """
         print(f"Step: {self.current_step}, Episode Reward: {self.episode_reward:.2f}")
 
     def close(self) -> None:

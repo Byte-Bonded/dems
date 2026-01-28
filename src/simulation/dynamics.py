@@ -104,6 +104,20 @@ class SynchronousGeneratorDynamic:
     """
     
     def __init__(self, gen_id: str, bus: int, params: Optional[GeneratorDynamicParams] = None):
+        """
+        Create a SynchronousGeneratorDynamic instance and initialize its physical parameters, state variables, operating point, and placeholders for auxiliary control models.
+        
+        Parameters:
+            gen_id (str): Unique identifier for the generator.
+            bus (int): Bus number where the generator is connected.
+            params (GeneratorDynamicParams, optional): Generator parameter set (inertia, damping, base MVA, frequency, transient reactances and time constants). If omitted, defaults are used.
+        
+        Notes:
+            - omega_base is computed from the configured nominal frequency.
+            - Initial states: delta (rad), omega (pu), Eq_prime (pu), Ed_prime (pu).
+            - Operating point variables (P_mech, P_elec, Q_elec, Vt) are initialized to zero/nominal.
+            - exciter, governor, and pss are left unassigned (None) and may be attached after construction.
+        """
         self.gen_id = gen_id
         self.bus = bus
         self.params = params or GeneratorDynamicParams()
@@ -129,7 +143,20 @@ class SynchronousGeneratorDynamic:
         self.pss: Optional[PowerSystemStabilizer] = None
         
     def initialize(self, P_mw: float, Q_mvar: float, Vt: float, delta_deg: float):
-        """Initialize generator at operating point"""
+        """
+        Set the generator's operating point and initialize derived dynamic states.
+        
+        Parameters:
+            P_mw (float): Active electrical power at the terminal in MW.
+            Q_mvar (float): Reactive electrical power at the terminal in MVAr.
+            Vt (float): Terminal voltage magnitude (per‑unit).
+            delta_deg (float): Rotor angle in degrees.
+        
+        Details:
+            Updates internal state variables (P_elec, Q_elec, P_mech, Vt, delta, omega)
+            and computes the internal transient EMF `Eq_prime` consistent with the
+            provided terminal conditions.
+        """
         self.P_elec = P_mw
         self.Q_elec = Q_mvar
         self.P_mech = P_mw  # Initial steady state
@@ -148,15 +175,18 @@ class SynchronousGeneratorDynamic:
         
     def update(self, dt: float, Vt: float, P_elec_mw: float) -> Tuple[float, float]:
         """
-        Update generator dynamics using swing equation
+        Advance the generator's swing dynamics by one time step and update its internal rotor state.
         
-        Args:
-            dt: Time step (seconds)
-            Vt: Terminal voltage (pu)
-            P_elec_mw: Electrical power output (MW)
-            
+        Parameters:
+            dt (float): Time step in seconds.
+            Vt (float): Terminal voltage in per-unit used to update the generator's stored terminal voltage.
+            P_elec_mw (float): Electrical output power in MW used to update the generator's stored electrical power.
+        
         Returns:
-            Tuple of (frequency_hz, rotor_angle_deg)
+            tuple: (frequency_hz, rotor_angle_deg) where `frequency_hz` is the generator electrical frequency and `rotor_angle_deg` is the rotor angle in degrees.
+        
+        Side effects:
+            Updates the instance's internal states (`omega`, `delta`), and stored attributes (`Vt`, `P_elec`).
         """
         self.Vt = Vt
         self.P_elec = P_elec_mw
@@ -189,15 +219,30 @@ class SynchronousGeneratorDynamic:
         return frequency_hz, np.degrees(self.delta)
     
     def set_mechanical_power(self, P_mech_mw: float):
-        """Set mechanical power input"""
+        """
+        Set the generator's mechanical input power.
+        
+        Parameters:
+            P_mech_mw (float): Mechanical input power in megawatts for the dynamic model.
+        """
         self.P_mech = P_mech_mw
         
     def get_frequency_hz(self) -> float:
-        """Get current frequency in Hz"""
+        """
+        Retrieve the generator's instantaneous electrical frequency.
+        
+        Returns:
+            frequency_hz (float): Instantaneous frequency in hertz.
+        """
         return self.omega * self.params.frequency
     
     def get_speed_deviation_pu(self) -> float:
-        """Get speed deviation from synchronous (pu)"""
+        """
+        Calculate the rotor speed deviation relative to synchronous speed.
+        
+        Returns:
+            speed_deviation_pu (float): Rotor speed deviation in per unit (omega - 1.0).
+        """
         return self.omega - 1.0
 
 
@@ -208,6 +253,18 @@ class ExcitationSystem:
     """
     
     def __init__(self, params: Optional[ExciterParams] = None):
+        """
+        Initialize the IEEE Type 1 excitation system and its internal state.
+        
+        Creates or uses the provided ExciterParams and sets initial regulator, field, and transducer states:
+        - Vr (regulator output) = 1.0 pu
+        - Efd (field voltage) = 1.0 pu
+        - Vt_filtered (filtered terminal voltage) = 1.0 pu
+        Also initializes the local Vref from the exciter parameters.
+        
+        Parameters:
+            params (Optional[ExciterParams]): Exciter configuration to use; a default ExciterParams instance is created when omitted.
+        """
         self.params = params or ExciterParams()
         
         # State variables
@@ -219,17 +276,19 @@ class ExcitationSystem:
     def update(self, dt: float, Vt: float, Vref: Optional[float] = None, 
                Vpss: float = 0.0) -> float:
         """
-        Update excitation system
-        
-        Args:
-            dt: Time step (seconds)
-            Vt: Terminal voltage (pu)
-            Vref: Reference voltage (optional override)
-            Vpss: PSS signal (pu)
-            
-        Returns:
-            Field voltage Efd (pu)
-        """
+               Update the IEEE Type 1 excitation system state and compute the field voltage.
+               
+               Updates the voltage transducer, regulator, and exciter states using first-order dynamics, enforces regulator and field limits, and returns the resulting field voltage.
+               
+               Parameters:
+                   dt (float): Time step in seconds.
+                   Vt (float): Measured terminal voltage in per unit.
+                   Vref (Optional[float]): If provided, overrides the exciter reference voltage for this update.
+                   Vpss (float): Power system stabilizer contribution added to the voltage error (pu).
+               
+               Returns:
+                   float: Field voltage Efd in per unit after limits are applied.
+               """
         if Vref is not None:
             self.Vref = Vref
             
@@ -264,6 +323,15 @@ class GovernorTurbine:
     """
     
     def __init__(self, params: Optional[GovernorParams] = None):
+        """
+        Create a TGOV1 governor-turbine instance and initialize its state.
+        
+        Parameters:
+            params (Optional[GovernorParams]): Governor parameters; a default GovernorParams instance is used when omitted.
+        
+        Details:
+            Initializes governor output `Pg` and mechanical power `Pm` to 1.0 pu, and sets `Pref` from `params.Pref`.
+        """
         self.params = params or GovernorParams()
         
         # State variables
@@ -273,15 +341,15 @@ class GovernorTurbine:
         
     def update(self, dt: float, omega: float, Pref: Optional[float] = None) -> float:
         """
-        Update governor-turbine dynamics
+        Advance the TGOV1 governor-turbine model by a time step and return the updated turbine mechanical power.
         
-        Args:
-            dt: Time step (seconds)
-            omega: Generator speed (pu, 1.0 = synchronous)
-            Pref: Power reference (optional override)
-            
+        Parameters:
+            dt (float): Time step in seconds.
+            omega (float): Generator speed in per unit (1.0 = synchronous).
+            Pref (Optional[float]): Optional power reference in per unit; if provided, replaces the controller's stored Pref.
+        
         Returns:
-            Mechanical power Pm (pu)
+            float: Updated turbine mechanical power Pm in per unit.
         """
         if Pref is not None:
             self.Pref = Pref
@@ -315,6 +383,20 @@ class PowerSystemStabilizer:
     
     def __init__(self):
         # IEEE PSS2A-type parameters (simplified)
+        """
+        Initialize a simplified IEEE PSS2A-like power system stabilizer with default tuning and zeroed internal states.
+        
+        Attributes:
+            T_washout (float): Washout time constant in seconds.
+            T_lead1 (float): Lead time constant 1 in seconds.
+            T_lag1 (float): Lag time constant 1 in seconds.
+            K_pss (float): PSS gain.
+            V_max (float): Upper output limit (per unit).
+            V_min (float): Lower output limit (per unit).
+            washout_state (float): Internal washout filter state.
+            lead_lag_state (float): Internal lead-lag compensator state.
+            output (float): Current PSS output (per unit).
+        """
         self.T_washout = 1.41     # Washout time constant (s)
         self.T_lead1 = 0.154      # Lead time constant 1 (s)
         self.T_lag1 = 0.033       # Lag time constant 1 (s)
@@ -329,14 +411,14 @@ class PowerSystemStabilizer:
         
     def update(self, dt: float, speed_deviation: float) -> float:
         """
-        Update PSS output
+        Compute the Power System Stabilizer (PSS) output for a single time step.
         
-        Args:
-            dt: Time step (seconds)
-            speed_deviation: Generator speed deviation (pu)
-            
+        Parameters:
+            dt (float): Time step in seconds.
+            speed_deviation (float): Generator speed deviation in per unit.
+        
         Returns:
-            PSS output signal (pu)
+            pss_output (float): PSS control signal in per unit, constrained to the configured output limits.
         """
         # Washout filter (high-pass)
         washout_input = speed_deviation
@@ -367,6 +449,20 @@ class AutomaticGenerationControl:
     """
     
     def __init__(self, area_id: str, params: Optional[AGCParams] = None):
+        """
+        Create an AutomaticGenerationControl controller for a specified control area.
+        
+        Parameters:
+        	area_id (str): Identifier for the control area this AGC instance manages.
+        	params (Optional[AGCParams]): AGC configuration parameters; if omitted, defaults are used.
+        
+        Initial state:
+        	- ace: Area Control Error (MW), initialized to 0.0.
+        	- agc_output: AGC signal to participating generators (MW), initialized to 0.0.
+        	- integral_ace: Time integral of ACE for PI action, initialized to 0.0.
+        	- participating_gens: Registered generator IDs for AGC participation.
+        	- participation_factors: Mapping of generator ID to its participation fraction.
+        """
         self.area_id = area_id
         self.params = params or AGCParams()
         
@@ -380,21 +476,29 @@ class AutomaticGenerationControl:
         self.participation_factors: Dict[str, float] = {}
         
     def add_participating_generator(self, gen_id: str, participation_factor: float):
-        """Add a generator to AGC participation"""
+        """
+        Register a generator to participate in the area AGC and assign its participation share.
+        
+        Parameters:
+            gen_id (str): Identifier of the generator to register.
+            participation_factor (float): Non-negative weight or share used to proportionally allocate AGC adjustments to this generator.
+        """
         self.participating_gens.append(gen_id)
         self.participation_factors[gen_id] = participation_factor
         
     def update(self, dt: float, frequency_hz: float, tie_line_error_mw: float = 0.0) -> Dict[str, float]:
         """
-        Update AGC and calculate generator setpoint adjustments
+        Compute the area AGC response and allocate per-generator power adjustments.
         
-        Args:
-            dt: Time step (seconds)
-            frequency_hz: Area frequency (Hz)
-            tie_line_error_mw: Tie-line flow error (MW)
-            
+        Applies the configured deadband and area frequency bias to form ACE, uses a PI controller with anti-windup to produce an AGC command, and distributes that command to registered generators according to their participation factors.
+        
+        Parameters:
+            dt (float): Time step in seconds.
+            frequency_hz (float): Current area frequency in Hz.
+            tie_line_error_mw (float): Tie-line flow error (ΔPtie) in MW; positive means export greater than scheduled.
+        
         Returns:
-            Dictionary of generator adjustments {gen_id: delta_P_mw}
+            Dict[str, float]: Mapping from generator ID to AGC power adjustment in MW (positive values increase mechanical setpoint).
         """
         # Frequency deviation from 50 Hz
         delta_f = frequency_hz - 50.0
@@ -428,7 +532,12 @@ class AutomaticGenerationControl:
         return adjustments
     
     def get_ace(self) -> float:
-        """Get current Area Control Error (MW)"""
+        """
+        Retrieve the current area control error for this AGC.
+        
+        Returns:
+            ace_mw (float): Current area control error in megawatts.
+        """
         return self.ace
 
 
@@ -444,6 +553,19 @@ class DynamicLoadModel:
     """
     
     def __init__(self, bus: int, P0_mw: float, Q0_mvar: float):
+        """
+        Initialize a ZIP-format dynamic load model with default voltage and frequency dependence coefficients.
+        
+        Parameters:
+            bus (int): Bus number where the load is connected.
+            P0_mw (float): Base active power in MW used as the nominal operating point.
+            Q0_mvar (float): Base reactive power in MVAR used as the nominal operating point.
+        
+        Notes:
+            - The instance sets default ZIP composition coefficients for active (Zp, Ip, Pp) and reactive (Zq, Iq, Pq) power.
+            - Frequency sensitivity coefficients Kpf and Kqf are expressed in percent change per Hz and apply to active and reactive power respectively.
+            - P_mw and Q_mvar are initialized to the provided base values and represent the current load state.
+        """
         self.bus = bus
         self.P0 = P0_mw           # Base active power (MW)
         self.Q0 = Q0_mvar         # Base reactive power (MVAR)
@@ -468,14 +590,14 @@ class DynamicLoadModel:
         
     def update(self, voltage_pu: float, frequency_hz: float) -> Tuple[float, float]:
         """
-        Update load based on voltage and frequency
+        Compute and update the load's active and reactive power based on ZIP voltage dependence and linear frequency sensitivity.
         
-        Args:
-            voltage_pu: Bus voltage (pu)
-            frequency_hz: System frequency (Hz)
-            
+        Parameters:
+            voltage_pu (float): Bus voltage in per unit.
+            frequency_hz (float): System frequency in hertz (50 Hz nominal).
+        
         Returns:
-            Tuple of (P_mw, Q_mvar)
+            tuple: (P_mw, Q_mvar) — updated active power in MW and reactive power in MVar; also stored to self.P_mw and self.Q_mvar. Frequency sensitivity is applied using delta_f = (frequency_hz - 50.0) / 50.0.
         """
         # Frequency deviation (per unit of 50 Hz)
         delta_f = (frequency_hz - 50.0) / 50.0
@@ -508,7 +630,19 @@ class ProtectionRelay:
     
     def __init__(self, element_id: str, element_type: str, 
                  params: Optional[ProtectionParams] = None):
-        self.element_id = element_id
+        """
+                 Initialize a protection relay for a network element and set its default state and timers.
+                 
+                 Parameters:
+                     element_id (str): Unique identifier of the protected element (e.g., bus or device ID).
+                     element_type (str): Type of the protected element; expected values include "generator", "line", or "load".
+                     params (Optional[ProtectionParams]): Protection thresholds and delay settings; when omitted, defaults are used.
+                 
+                 Description:
+                     Creates the relay and initializes its runtime state: trip flag, trip reason, alarm flags/reasons,
+                     and delayed-trip timers for under/over voltage and under/over frequency.
+                 """
+                 self.element_id = element_id
         self.element_type = element_type  # "generator", "line", "load"
         self.params = params or ProtectionParams()
         
@@ -526,15 +660,24 @@ class ProtectionRelay:
         
     def check(self, dt: float, voltage_pu: float, frequency_hz: float) -> Dict:
         """
-        Check protection conditions
+        Evaluate voltage and frequency protection for the element, update internal timers, and set alarm/trip state.
         
-        Args:
-            dt: Time step (seconds)
-            voltage_pu: Element voltage (pu)
-            frequency_hz: System frequency (Hz)
-            
+        This method checks warn and trip thresholds for voltage and frequency, appends human-readable alarm messages when warn thresholds are crossed, increments time-delayed trip timers, sets the trip state and trip reason when a trip delay is exceeded, and resets timers when conditions clear.
+        
+        Parameters:
+            dt (float): Time step in seconds used to advance trip timers.
+            voltage_pu (float): Measured element voltage in per unit.
+            frequency_hz (float): Measured system frequency in hertz.
+        
         Returns:
-            Dictionary with protection status
+            dict: Protection status with keys:
+                - "element_id": identifier of the protected element.
+                - "tripped": `True` if the element has been tripped, `False` otherwise.
+                - "trip_reason": human-readable reason for the trip or empty string if not tripped.
+                - "alarm_active": `True` if any warning-level conditions are active.
+                - "alarm_reasons": list of human-readable warning messages.
+                - "voltage_pu": the input `voltage_pu`.
+                - "frequency_hz": the input `frequency_hz`.
         """
         self.alarm_reasons = []
         
@@ -602,7 +745,11 @@ class ProtectionRelay:
         }
         
     def reset(self):
-        """Reset relay after trip"""
+        """
+        Reset the protection relay to its default (untripped) state.
+        
+        Clears trip status and reason, deactivates alarms and alarm reasons, and resets all protection timers to zero.
+        """
         self.tripped = False
         self.trip_reason = None
         self.alarm_active = False
@@ -622,6 +769,11 @@ class DynamicsCoordinator:
     """
     
     def __init__(self):
+        """
+        Initialize the DynamicsCoordinator internal state used to manage dynamic models and simulation time.
+        
+        Creates empty registries for generators, exciters, governors, PSS units, AGC controllers, dynamic loads, and protection relays, and sets the simulation clock and nominal system frequency (50.0 Hz).
+        """
         self.generators: Dict[str, SynchronousGeneratorDynamic] = {}
         self.exciters: Dict[str, ExcitationSystem] = {}
         self.governors: Dict[str, GovernorTurbine] = {}
@@ -639,7 +791,21 @@ class DynamicsCoordinator:
                       with_avr: bool = True, 
                       with_governor: bool = True,
                       with_pss: bool = False):
-        """Add a generator with optional control systems"""
+        """
+                      Register a synchronous generator with the coordinator and optionally attach AVR, governor, and PSS control modules.
+                      
+                      Parameters:
+                          gen_id (str): Unique identifier for the generator.
+                          bus (int): Bus number where the generator is connected.
+                          params (Optional[GeneratorDynamicParams]): Generator dynamic parameters; defaults are used if None.
+                          with_avr (bool): If True, attach an IEEE Type 1 excitation system (AVR) to the generator.
+                          with_governor (bool): If True, attach a TGOV1 governor-turbine model to the generator.
+                          with_pss (bool): If True, attach a power system stabilizer (PSS) to the generator.
+                      
+                      Side effects:
+                          - Creates and stores the SynchronousGeneratorDynamic instance and any requested control components in the coordinator's internal registries.
+                          - Adds a ProtectionRelay for the generator and logs the addition.
+                      """
         gen = SynchronousGeneratorDynamic(gen_id, bus, params)
         self.generators[gen_id] = gen
         
@@ -661,16 +827,23 @@ class DynamicsCoordinator:
         logger.info(f"Added dynamic generator {gen_id} at bus {bus}")
         
     def add_load(self, bus: int, P0_mw: float, Q0_mvar: float):
-        """Add a dynamic load model"""
+        """
+        Register a ZIP-based dynamic load model at the given bus with an initial active and reactive power setpoint.
+        
+        Parameters:
+        	bus (int): Bus identifier where the dynamic load is attached.
+        	P0_mw (float): Initial active power demand in megawatts.
+        	Q0_mvar (float): Initial reactive power demand in megavars.
+        """
         self.loads[bus] = DynamicLoadModel(bus, P0_mw, Q0_mvar)
         
     def add_agc(self, area_id: str, participating_gens: List[Tuple[str, float]]):
         """
-        Add AGC controller for an area
+        Register an Automatic Generation Control (AGC) instance for a given area and configure its participating generators.
         
-        Args:
-            area_id: Area identifier
-            participating_gens: List of (gen_id, participation_factor) tuples
+        Parameters:
+            area_id (str): Identifier for the control area.
+            participating_gens (List[Tuple[str, float]]): Iterable of (gen_id, participation_factor) pairs specifying each generator's participation share in AGC. 
         """
         agc = AutomaticGenerationControl(area_id)
         for gen_id, pf in participating_gens:
@@ -680,16 +853,23 @@ class DynamicsCoordinator:
     def step(self, dt: float, bus_voltages: Dict[int, float], 
              gen_powers: Dict[str, float]) -> Dict:
         """
-        Advance simulation by one time step
-        
-        Args:
-            dt: Time step (seconds)
-            bus_voltages: Dictionary of {bus: voltage_pu}
-            gen_powers: Dictionary of {gen_id: P_elec_mw}
-            
-        Returns:
-            Dictionary with updated system state
-        """
+             Advance the entire dynamic simulation by a single time step.
+             
+             Parameters:
+                 dt (float): Time step in seconds.
+                 bus_voltages (Dict[int, float]): Mapping from bus number to per-unit terminal voltage.
+                 gen_powers (Dict[str, float]): Mapping from generator ID to electrical output power in MW; if a generator ID is absent its last known electrical power is used.
+             
+             Returns:
+                 state (Dict): Snapshot of the updated system state containing:
+                     - time: current simulation time in seconds
+                     - system_frequency_hz: aggregated system frequency in Hz
+                     - generator_frequencies: mapping {gen_id: frequency_hz}
+                     - generator_angles: mapping {gen_id: rotor angle in degrees}
+                     - agc_adjustments: mapping {area_id: {gen_id: delta_P_mw}} from AGC updates
+                     - load_updates: mapping {bus: {"P_mw": P, "Q_mvar": Q}} for dynamic loads
+                     - protection: mapping {element_id: protection_status} with relay check results
+             """
         self.time_seconds += dt
         
         # 1. Update governors (primary frequency response)
@@ -758,11 +938,26 @@ class DynamicsCoordinator:
         }
     
     def get_system_frequency(self) -> float:
-        """Get current system frequency (Hz)"""
+        """
+        Retrieve the current system frequency.
+        
+        Returns:
+            system_frequency_hz (float): Current system frequency in hertz.
+        """
         return self.system_frequency_hz
     
     def get_generator_states(self) -> Dict:
-        """Get all generator states"""
+        """
+        Snapshot of each generator's dynamic state.
+        
+        Returns:
+            states (Dict[str, Dict]): Mapping from generator ID to a dictionary with keys:
+                - frequency_hz: generator electrical frequency in Hz
+                - angle_deg: rotor angle in degrees
+                - omega_pu: per-unit rotor speed
+                - P_mech_mw: mechanical power in MW
+                - P_elec_mw: electrical output power in MW
+        """
         return {
             gen_id: {
                 "frequency_hz": gen.get_frequency_hz(),
@@ -794,14 +989,14 @@ IEEE39_GENERATOR_DATA = {
 
 def create_ieee39_dynamics(area_offset: int = 0, area_id: str = "A") -> DynamicsCoordinator:
     """
-    Create dynamics coordinator with IEEE 39-bus generator models
+    Constructs a DynamicsCoordinator populated with IEEE 39-bus generator models and an area AGC.
     
-    Args:
-        area_offset: Bus offset for merged supergrid (0, 39, or 78)
-        area_id: Area identifier ("A", "B", or "C")
-        
+    Parameters:
+        area_offset (int): Bus index offset applied to each IEEE39 bus number (e.g., 0, 39, 78) to create a merged supergrid.
+        area_id (str): Area identifier used when naming generators (e.g., "A", "B", "C").
+    
     Returns:
-        Configured DynamicsCoordinator
+        coordinator (DynamicsCoordinator): Coordinator containing one generator per IEEE39 entry (generator IDs formatted as "Gen_{area_id}_{bus}"), AGC configured for the area, PSS attached to units with MVA >= 600, and participation factors for AGC proportional to generator MVA (MVA/5000). Slack machines are excluded from AGC participation.
     """
     coordinator = DynamicsCoordinator()
     

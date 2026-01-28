@@ -15,12 +15,29 @@ class BaseRLAgent(ABC):
 
     @abstractmethod
     def predict(self, state: np.ndarray) -> Tuple[np.ndarray, Dict]:
-        """Predict action given state"""
+        """
+        Select an action for the given environment state.
+        
+        Parameters:
+            state (np.ndarray): Current observation from the environment.
+        
+        Returns:
+            tuple: `(action, info)` where `action` is an action compatible with the environment's action_space, and `info` is a dictionary with metadata about the decision (e.g., whether a trained model was used and which algorithm is configured).
+        """
         pass
 
     @abstractmethod
     def train(self, total_timesteps: int, callback: Optional[Any] = None) -> Dict:
-        """Train the agent"""
+        """
+        Train the underlying RL model for a specified number of timesteps.
+        
+        Parameters:
+            total_timesteps (int): Number of environment timesteps to train the model.
+            callback (Optional[Any]): Optional callback passed through to the learner during training.
+        
+        Returns:
+            Dict: If the model is not initialized, a dictionary with status `"error"` and an explanatory `message`. If training runs, a dictionary with status `"success"`, the `algorithm` name, `total_timesteps` trained, and `training_episodes` (the number of recorded training runs).
+        """
         pass
 
     @abstractmethod
@@ -50,14 +67,14 @@ class RLAgent(BaseRLAgent):
         tensorboard_log: Optional[str] = None,
     ):
         """
-        Initialize RL Agent
+        Create an RL agent bound to an environment and configured for a chosen algorithm.
         
-        Args:
-            env: Gymnasium environment (DEMSEnvironment)
-            algorithm: 'PPO' or 'SAC'
-            learning_rate: Learning rate for optimizer
-            verbose: Verbosity level (0=none, 1=info, 2=debug)
-            tensorboard_log: Path for tensorboard logs
+        Parameters:
+            env (Any): Gymnasium-compatible environment providing `observation_space` and `action_space`.
+            algorithm (str): Algorithm identifier, either "PPO" or "SAC". Determines the underlying model type.
+            learning_rate (float): Optimizer learning rate for the chosen algorithm.
+            verbose (int): Verbosity level (0 = silent, 1 = info, 2 = debug).
+            tensorboard_log (Optional[str]): Path to write TensorBoard logs, or `None` to disable.
         """
         self.env = env
         self.algorithm = algorithm
@@ -75,7 +92,11 @@ class RLAgent(BaseRLAgent):
         self._initialize_model()
 
     def _initialize_model(self):
-        """Initialize the RL model based on algorithm choice"""
+        """
+        Create and assign a stable-baselines3 model for the agent based on the configured algorithm.
+        
+        Initializes self.model to a PPO or SAC instance configured with the agent's environment and hyperparameters. If self.algorithm is not 'PPO' or 'SAC', raises a ValueError. If stable_baselines3 cannot be imported, prints a warning, sets self.model to None, and leaves the agent in random-action mode until a model is loaded.
+        """
         try:
             if self.algorithm.upper() == "PPO":
                 from stable_baselines3 import PPO
@@ -115,15 +136,17 @@ class RLAgent(BaseRLAgent):
 
     def predict(self, state: np.ndarray, deterministic: bool = True) -> Tuple[np.ndarray, Dict]:
         """
-        Predict optimal action given current state
+        Return an action for the given environment state using the trained model or a random action if no model is available.
         
-        Args:
-            state: Current observation from environment
-            deterministic: If True, use deterministic policy; else sample
-            
+        Parameters:
+        	state (np.ndarray): Observation from the environment.
+        	deterministic (bool): If True, use the policy deterministically; if False, allow stochastic action sampling.
+        
         Returns:
-            action: Predicted action
-            info: Additional information dictionary
+        	action (np.ndarray): Action to apply in the environment.
+        	info (dict): Metadata about the prediction with keys:
+        		- "info": "trained" if a model produced the action, "untrained" if the action was sampled randomly.
+        		- "algorithm": Name of the configured algorithm (e.g., "PPO" or "SAC").
         """
         if self.model is None:
             # Random action if model not initialized
@@ -175,13 +198,17 @@ class RLAgent(BaseRLAgent):
 
     def evaluate(self, n_episodes: int = 10) -> Dict:
         """
-        Evaluate the agent's performance
+        Compute the mean and standard deviation of episode rewards for the current model over a number of evaluation episodes.
         
-        Args:
-            n_episodes: Number of episodes to evaluate
-            
+        Parameters:
+            n_episodes (int): Number of episodes to run for evaluation.
+        
         Returns:
-            Dictionary with evaluation metrics
+            dict: If the model is initialized, returns {
+                "mean_reward": float(mean reward across evaluated episodes),
+                "std_reward": float(standard deviation of rewards),
+                "n_episodes": n_episodes
+            }. If the model is not initialized, returns {"error": "Model not initialized"}.
         """
         if self.model is None:
             return {"error": "Model not initialized"}
@@ -203,10 +230,12 @@ class RLAgent(BaseRLAgent):
 
     def save(self, path: str) -> None:
         """
-        Save trained model to disk
+        Persist the current trained model to the given filesystem path.
         
-        Args:
-            path: File path to save model
+        Creates parent directories if they do not exist and saves the model file at the provided path. If no model is initialized, no file is written and a warning is emitted.
+        
+        Parameters:
+            path (str): Destination filesystem path (including filename) where the model will be saved.
         """
         if self.model is not None:
             # Create directory if it doesn't exist
@@ -235,7 +264,16 @@ class RLAgent(BaseRLAgent):
             print(f"Error loading model: {e}")
 
     def get_training_stats(self) -> Dict:
-        """Get training statistics"""
+        """
+        Retrieve aggregated training statistics for the agent.
+        
+        Returns:
+            stats (dict): A dictionary with the following keys:
+                - algorithm (str): The algorithm name configured for the agent.
+                - training_runs (int): Number of recorded training runs.
+                - total_timesteps (int): Sum of timesteps across all recorded training runs.
+                - model_initialized (bool): `True` if a model instance is initialized, `False` otherwise.
+        """
         return {
             "algorithm": self.algorithm,
             "training_runs": len(self.training_history),
@@ -244,6 +282,12 @@ class RLAgent(BaseRLAgent):
         }
 
     def __repr__(self) -> str:
+        """
+        Return a string representation of the agent.
+        
+        Returns:
+        	str: A string showing the algorithm, observation space, and action space.
+        """
         return (
             f"RLAgent(algorithm={self.algorithm}, "
             f"obs_space={self.observation_space}, "
