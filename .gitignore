@@ -69,7 +69,3 @@ grafana/data/
 
 # Docker
 .dockerignore
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb

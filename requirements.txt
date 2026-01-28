@@ -16,6 +16,10 @@ stable-baselines3>=2.0.0
 ray[rllib]>=2.3.0
 # Using gymnasium (gym is deprecated and incompatible with NumPy 2.0)
 gymnasium>=1.0.0
+# RL Framework & Agent
+stable-baselines3>=1.5.0
+ray[rllib]>=1.13.0
+gym>=0.21.0
 tensorboard>=2.8.0
 
 # API & Web
