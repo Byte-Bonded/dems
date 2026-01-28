@@ -175,10 +175,10 @@ agent.load("models/ppo_agent")
 pytest
 
 # Run integration tests (tests real SuperGrid)
-pytest tests/test_integration.py -v
+pytest tests/test_dems.py -k TestIntegration -v
 
 # Run RL agent tests
-pytest tests/test_rl_agent.py -v
+pytest tests/test_dems.py::TestRLAgent -v
 
 # Coverage report
 pytest --cov=src tests/
@@ -238,7 +238,7 @@ MIT License - see [LICENSE](LICENSE)
 
 ## 🤝 Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md)
+Contributions welcome! Please open issues and pull requests on GitHub.
 
 ---
 

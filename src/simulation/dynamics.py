@@ -631,12 +631,16 @@ class ProtectionRelay:
     def __init__(self, element_id: str, element_type: str, 
                  params: Optional[ProtectionParams] = None):
         """
-        Initialize a protection relay for a network element.
-        
-        Args:
-            element_id: Unique identifier of the protected element
-            element_type: Type of element ("generator", "line", or "load")
-            params: Protection thresholds and delay settings
+        Initialize a protection relay for a network element and set its default state and timers.
+
+        Parameters:
+            element_id (str): Unique identifier of the protected element (e.g., bus or device ID).
+            element_type (str): Type of the protected element; expected values include "generator", "line", or "load".
+            params (Optional[ProtectionParams]): Protection thresholds and delay settings; when omitted, defaults are used.
+
+        Description:
+            Creates the relay and initializes its runtime state: trip flag, trip reason, alarm flags/reasons,
+            and delayed-trip timers for under/over voltage and under/over frequency.
         """
         self.element_id = element_id
         self.element_type = element_type  # "generator", "line", "load"
