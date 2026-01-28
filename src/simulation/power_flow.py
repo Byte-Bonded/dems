@@ -12,7 +12,7 @@ Power flow (load flow) analysis determines:
 import pandapower as pp
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from enum import Enum
 import logging
 import time
