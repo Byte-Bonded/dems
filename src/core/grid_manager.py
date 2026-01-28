@@ -12,7 +12,7 @@ Note: This is a monitoring layer - use DEMSGrid for actual grid control.
 """
 
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 import logging

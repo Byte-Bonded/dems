@@ -7,7 +7,7 @@ import pytest
 import numpy as np
 
 from src.grid import DEMSGrid
-from src.core import EnergyManager, GridMonitor
+from src.core import EnergyManager, GridMonitor, GridManager
 from src.agent import DEMSEnvironment, RLAgent
 
 
@@ -39,6 +39,12 @@ def energy_manager():
 def grid_monitor():
     """Create GridMonitor instance for stability monitoring"""
     return GridMonitor()
+
+
+@pytest.fixture
+def grid_manager():
+    """Create GridManager instance for grid management"""
+    return GridManager(num_nodes=10)
 
 
 @pytest.fixture
