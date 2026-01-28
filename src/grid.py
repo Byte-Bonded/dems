@@ -8,74 +8,19 @@ engine, use the src.simulation module.
 """
 
 import logging
-import time
-from functools import wraps
-from typing import Dict, Optional, List, Callable, Any
+from typing import Dict, Optional, List, Any
 from src.simulation import SuperGrid, PowerFlowRunner, PowerFlowResult
 from src.simulation.supergrid import AreaID, SuperGridConfig
 
+# Import decorators from utils (also available locally for backward compat)
+from src.utils.decorators import (
+    log_operation,
+    measure_performance,
+    validate_converged,
+    safe_grid_operation,
+)
+
 logger = logging.getLogger(__name__)
-
-
-# ======================== DECORATORS ======================== #
-
-def log_operation(func: Callable) -> Callable:
-    """Decorator to log grid operations with execution details"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        func_name = func.__name__
-        logger.info(f"Starting {func_name}")
-        try:
-            result = func(*args, **kwargs)
-            logger.info(f"Completed {func_name} successfully")
-            return result
-        except Exception as e:
-            logger.error(f"Error in {func_name}: {str(e)}")
-            raise
-    return wrapper
-
-
-def measure_performance(func: Callable) -> Callable:
-    """Decorator to measure and log execution time"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        elapsed = time.perf_counter() - start_time
-        logger.debug(f"{func.__name__} took {elapsed*1000:.2f}ms")
-        return result
-    return wrapper
-
-
-def validate_converged(func: Callable) -> Callable:
-    """Decorator to ensure power flow has converged before state operations"""
-    @wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if self._last_result is None:
-            logger.warning(f"{func.__name__} called before running power flow")
-        elif not self._last_result.converged:
-            logger.warning(f"{func.__name__} called with non-converged power flow")
-        return func(self, *args, **kwargs)
-    return wrapper
-
-
-def safe_grid_operation(func: Callable) -> Callable:
-    """Decorator for safe grid operations with automatic error recovery"""
-    @wraps(func)
-    def wrapper(self, *args, **kwargs):
-        try:
-            return func(self, *args, **kwargs)
-        except Exception as e:
-            logger.error(f"Grid operation {func.__name__} failed: {str(e)}")
-            logger.info("Attempting automatic recovery...")
-            try:
-                self.reset()
-                logger.info("Grid reset successful, retrying operation")
-                return func(self, *args, **kwargs)
-            except Exception as recovery_error:
-                logger.critical(f"Recovery failed: {str(recovery_error)}")
-                raise
-    return wrapper
 
 
 class DEMSGrid:
@@ -145,8 +90,15 @@ class DEMSGrid:
             
         Returns:
             Dictionary with area metrics
+            
+        Raises:
+            ValueError: If area is invalid
+            RuntimeError: If power flow has not converged
         """
-        area_id = AreaID(area)
+        try:
+            area_id = AreaID(area)
+        except ValueError:
+            raise ValueError(f"Invalid area '{area}'. Must be 'A', 'B', or 'C'")
         return self.supergrid.get_area_state(area_id)
         
     @safe_grid_operation
@@ -158,8 +110,22 @@ class DEMSGrid:
         Args:
             area: Area identifier ("A", "B", or "C")
             target_mw: Total generation target in MW
+            
+        Raises:
+            ValueError: If area is invalid or target_mw is negative
         """
-        area_id = AreaID(area)
+        # Validate inputs
+        try:
+            area_id = AreaID(area)
+        except ValueError:
+            raise ValueError(f"Invalid area '{area}'. Must be 'A', 'B', or 'C'")
+        
+        if target_mw < 0:
+            raise ValueError(f"Generation target must be non-negative, got {target_mw}")
+        
+        if target_mw > 5000:
+            logger.warning(f"Very high generation target for {area}: {target_mw} MW")
+        
         self.supergrid.set_area_generation(area_id, target_mw)
         
     @safe_grid_operation
@@ -171,8 +137,22 @@ class DEMSGrid:
         Args:
             area: Area identifier ("A", "B", or "C")
             scale_factor: Multiplication factor (1.0 = no change)
+            
+        Raises:
+            ValueError: If area is invalid or scale_factor is out of range
         """
-        area_id = AreaID(area)
+        # Validate inputs
+        try:
+            area_id = AreaID(area)
+        except ValueError:
+            raise ValueError(f"Invalid area '{area}'. Must be 'A', 'B', or 'C'")
+        
+        if scale_factor < 0:
+            raise ValueError(f"Scale factor must be non-negative, got {scale_factor}")
+        
+        if scale_factor > 3.0:
+            logger.warning(f"Very high scale factor for {area}: {scale_factor}")
+        
         self.supergrid.scale_loads(area_id, scale_factor)
         
     @validate_converged

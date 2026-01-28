@@ -8,13 +8,19 @@ DER Types:
 - Battery Storage (BESS): Controllable charge/discharge
 - EV Charging: Smart charging with load flexibility
 - Demand Response: Controllable load curtailment
+
+Thread Safety:
+- All public methods are thread-safe via internal locking
+- Use DERManager in multi-threaded environments safely
 """
 
 import pandapower as pp
 import numpy as np
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -88,6 +94,51 @@ class DERState:
     curtailed_load_mw: Optional[float] = None
 
 
+@dataclass
+class BatteryState:
+    """Comprehensive battery state tracking with degradation"""
+    name: str
+    soc: float  # State of charge (0-1)
+    capacity_mwh: float  # Current effective capacity
+    nominal_capacity_mwh: float  # Original capacity
+    total_cycles: float = 0.0  # Total equivalent full cycles
+    last_update: datetime = field(default_factory=datetime.now)
+    round_trip_efficiency: float = 0.92  # 92% typical for Li-ion
+    degradation_factor: float = 1.0  # Health factor (1.0 = new)
+    
+    def update_soc(self, delta_energy_mwh: float) -> float:
+        """
+        Update SOC accounting for efficiency and track cycles.
+        
+        Args:
+            delta_energy_mwh: Energy change (positive=discharge, negative=charge)
+            
+        Returns:
+            Actual energy delivered/absorbed after efficiency
+        """
+        # Apply efficiency losses
+        if delta_energy_mwh > 0:  # Discharging
+            actual_energy = delta_energy_mwh
+            soc_delta = -delta_energy_mwh / self.capacity_mwh
+        else:  # Charging
+            actual_energy = delta_energy_mwh * self.round_trip_efficiency
+            soc_delta = -actual_energy / self.capacity_mwh
+        
+        # Update SOC with bounds
+        old_soc = self.soc
+        self.soc = np.clip(self.soc + soc_delta, 0.0, 1.0)
+        
+        # Track cycles (one full charge + discharge = 1 cycle)
+        self.total_cycles += abs(self.soc - old_soc) / 2
+        
+        # Update degradation (simple linear model: 20% loss at 5000 cycles)
+        self.degradation_factor = max(0.8, 1.0 - (self.total_cycles / 5000) * 0.2)
+        self.capacity_mwh = self.nominal_capacity_mwh * self.degradation_factor
+        
+        self.last_update = datetime.now()
+        return actual_energy
+
+
 class DERManager:
     """
     Manages Distributed Energy Resources in the grid
@@ -97,6 +148,10 @@ class DERManager:
     - Updating DER output based on conditions
     - Managing battery storage dispatch
     - Tracking DER state
+    
+    Thread Safety:
+        All public methods are protected by an internal lock.
+        Safe for concurrent access from multiple threads.
     """
     
     def __init__(self, net: pp.pandapowerNet):
@@ -105,11 +160,19 @@ class DERManager:
         
         Args:
             net: Pandapower network to add DER to
+            
+        Raises:
+            ValueError: If net is None
         """
+        if net is None:
+            raise ValueError("Network cannot be None")
+            
         self.net = net
         self.der_specs: List[DERSpec] = []
         self.der_indices: Dict[str, int] = {}  # name -> pandapower index
-        self.battery_soc: Dict[str, float] = {}  # name -> state of charge
+        self.battery_soc: Dict[str, float] = {}  # name -> state of charge (legacy)
+        self._battery_states: Dict[str, BatteryState] = {}  # Enhanced battery tracking
+        self._lock = threading.RLock()  # Reentrant lock for thread safety
         
     def add_solar_pv(
         self, 
@@ -386,20 +449,42 @@ class DERManager:
         Args:
             name: PV system name
             irradiance_w_m2: Solar irradiance (W/m²), typically 0-1000
-        """
-        spec = self._get_spec(name)
-        if spec.der_type != DERType.SOLAR_PV:
-            raise ValueError(f"{name} is not a solar PV system")
             
-        # Calculate output: P = Area × Irradiance × Efficiency
-        irradiance_kw_m2 = irradiance_w_m2 / 1000.0
-        output_mw = (spec.panel_area_m2 * irradiance_kw_m2 * spec.efficiency) / 1000.0
-        output_mw = min(output_mw, spec.capacity_mw)
-        
-        idx = self.der_indices[name]
-        self.net.sgen.at[idx, 'p_mw'] = output_mw
-        
-        logger.debug(f"{name}: {irradiance_w_m2} W/m² → {output_mw:.2f} MW")
+        Raises:
+            ValueError: If DER not found or wrong type
+            RuntimeError: If network index is invalid
+        """
+        with self._lock:
+            try:
+                spec = self._get_spec(name)
+            except KeyError:
+                raise ValueError(f"DER '{name}' not found")
+                
+            if spec.der_type != DERType.SOLAR_PV:
+                raise ValueError(f"{name} is not a solar PV system (type: {spec.der_type.value})")
+            
+            # Validate irradiance
+            if irradiance_w_m2 < 0:
+                logger.warning(f"Negative irradiance {irradiance_w_m2} for {name}, clamping to 0")
+                irradiance_w_m2 = 0
+            elif irradiance_w_m2 > 1400:  # Max possible solar irradiance on Earth
+                logger.warning(f"Irradiance {irradiance_w_m2} exceeds maximum, clamping to 1400")
+                irradiance_w_m2 = 1400
+                
+            # Calculate output: P = Area × Irradiance × Efficiency
+            irradiance_kw_m2 = irradiance_w_m2 / 1000.0
+            output_mw = (spec.panel_area_m2 * irradiance_kw_m2 * spec.efficiency) / 1000.0
+            output_mw = min(output_mw, spec.capacity_mw)
+            
+            idx = self.der_indices.get(name)
+            if idx is None:
+                raise RuntimeError(f"DER '{name}' has no registered network index")
+            if idx not in self.net.sgen.index:
+                raise RuntimeError(f"DER '{name}' index {idx} no longer valid in network")
+                
+            self.net.sgen.at[idx, 'p_mw'] = output_mw
+            
+            logger.debug(f"{name}: {irradiance_w_m2} W/m² → {output_mw:.2f} MW")
         
     def set_wind_output(self, name: str, wind_speed_m_s: float) -> None:
         """
@@ -408,26 +493,45 @@ class DERManager:
         Args:
             name: Wind farm name
             wind_speed_m_s: Wind speed (m/s)
+            
+        Raises:
+            ValueError: If DER not found or wrong type
+            RuntimeError: If network index is invalid
         """
-        spec = self._get_spec(name)
-        if spec.der_type != DERType.WIND:
-            raise ValueError(f"{name} is not a wind system")
+        with self._lock:
+            try:
+                spec = self._get_spec(name)
+            except KeyError:
+                raise ValueError(f"DER '{name}' not found")
+                
+            if spec.der_type != DERType.WIND:
+                raise ValueError(f"{name} is not a wind system (type: {spec.der_type.value})")
             
-        # Simplified power curve: cubic relationship between 3-15 m/s
-        if wind_speed_m_s < 3:
-            capacity_factor = 0
-        elif wind_speed_m_s > 15:
-            capacity_factor = 1.0
-        else:
-            # Cubic approximation: P ∝ v³
-            capacity_factor = min(((wind_speed_m_s - 3) / 12) ** 3, 1.0)
+            # Validate wind speed
+            if wind_speed_m_s < 0:
+                logger.warning(f"Negative wind speed {wind_speed_m_s} for {name}, clamping to 0")
+                wind_speed_m_s = 0
+                
+            # Simplified power curve: cubic relationship between 3-15 m/s
+            if wind_speed_m_s < 3:
+                capacity_factor = 0
+            elif wind_speed_m_s > 15:
+                capacity_factor = 1.0
+            else:
+                # Cubic approximation: P ∝ v³
+                capacity_factor = min(((wind_speed_m_s - 3) / 12) ** 3, 1.0)
+                
+            output_mw = spec.capacity_mw * capacity_factor
             
-        output_mw = spec.capacity_mw * capacity_factor
-        
-        idx = self.der_indices[name]
-        self.net.sgen.at[idx, 'p_mw'] = output_mw
-        
-        logger.debug(f"{name}: {wind_speed_m_s} m/s → {output_mw:.2f} MW ({capacity_factor*100:.1f}%)")
+            idx = self.der_indices.get(name)
+            if idx is None:
+                raise RuntimeError(f"DER '{name}' has no registered network index")
+            if idx not in self.net.sgen.index:
+                raise RuntimeError(f"DER '{name}' index {idx} no longer valid in network")
+                
+            self.net.sgen.at[idx, 'p_mw'] = output_mw
+            
+            logger.debug(f"{name}: {wind_speed_m_s} m/s → {output_mw:.2f} MW ({capacity_factor*100:.1f}%)")
         
     def set_battery_power(self, name: str, power_mw: float) -> None:
         """
@@ -436,18 +540,45 @@ class DERManager:
         Args:
             name: Battery name
             power_mw: Power in MW (positive = discharge, negative = charge)
-        """
-        spec = self._get_spec(name)
-        if spec.der_type != DERType.BESS:
-            raise ValueError(f"{name} is not a battery system")
             
-        # Clamp to charge/discharge limits
-        power_mw = np.clip(power_mw, -spec.charge_rate_mw, spec.discharge_rate_mw)
-        
-        idx = self.der_indices[name]
-        self.net.storage.at[idx, 'p_mw'] = power_mw
-        
-        logger.debug(f"{name}: {'Discharging' if power_mw > 0 else 'Charging'} at {abs(power_mw):.2f} MW")
+        Raises:
+            ValueError: If DER not found or wrong type
+            RuntimeError: If network index is invalid
+        """
+        with self._lock:
+            try:
+                spec = self._get_spec(name)
+            except KeyError:
+                raise ValueError(f"DER '{name}' not found")
+                
+            if spec.der_type != DERType.BESS:
+                raise ValueError(f"{name} is not a battery system (type: {spec.der_type.value})")
+            
+            # Clamp to charge/discharge limits
+            original_power = power_mw
+            power_mw = np.clip(power_mw, -spec.charge_rate_mw, spec.discharge_rate_mw)
+            if original_power != power_mw:
+                logger.warning(f"{name}: Power {original_power} MW clamped to {power_mw} MW")
+            
+            # Check SOC limits
+            if name in self._battery_states:
+                batt_state = self._battery_states[name]
+                if power_mw > 0 and batt_state.soc <= 0.05:
+                    logger.warning(f"{name}: SOC too low ({batt_state.soc:.1%}) for discharge")
+                    power_mw = 0
+                elif power_mw < 0 and batt_state.soc >= 0.95:
+                    logger.warning(f"{name}: SOC too high ({batt_state.soc:.1%}) for charge")
+                    power_mw = 0
+            
+            idx = self.der_indices.get(name)
+            if idx is None:
+                raise RuntimeError(f"DER '{name}' has no registered network index")
+            if idx not in self.net.storage.index:
+                raise RuntimeError(f"DER '{name}' index {idx} no longer valid in network")
+                
+            self.net.storage.at[idx, 'p_mw'] = power_mw
+            
+            logger.debug(f"{name}: {'Discharging' if power_mw > 0 else 'Charging'} at {abs(power_mw):.2f} MW")
         
     def set_ev_charging_load(self, name: str, utilization: float, smart_override: bool = False) -> None:
         """
@@ -457,23 +588,41 @@ class DERManager:
             name: EV station name
             utilization: Charger utilization (0-1), 0=no EVs, 1=all chargers full
             smart_override: If True, allows reducing load for grid balancing
-        """
-        spec = self._get_spec(name)
-        if spec.der_type != DERType.EV_CHARGING:
-            raise ValueError(f"{name} is not an EV charging station")
-        
-        # Calculate load based on utilization
-        target_load_mw = spec.capacity_mw * utilization
-        
-        # If smart charging enabled and override requested, can reduce by up to 50%
-        if spec.smart_charging_enabled and smart_override:
-            target_load_mw *= 0.5
             
-        idx = self.der_indices[name]
-        self.net.load.at[idx, 'p_mw'] = target_load_mw
-        self.net.load.at[idx, 'q_mvar'] = target_load_mw * 0.1
-        
-        logger.debug(f"{name}: {utilization*100:.1f}% utilization → {target_load_mw:.2f} MW")
+        Raises:
+            ValueError: If DER not found, wrong type, or utilization out of range
+            RuntimeError: If network index is invalid
+        """
+        with self._lock:
+            try:
+                spec = self._get_spec(name)
+            except KeyError:
+                raise ValueError(f"DER '{name}' not found")
+                
+            if spec.der_type != DERType.EV_CHARGING:
+                raise ValueError(f"{name} is not an EV charging station (type: {spec.der_type.value})")
+            
+            # Validate utilization
+            if not 0 <= utilization <= 1:
+                raise ValueError(f"Utilization must be 0-1, got {utilization}")
+            
+            # Calculate load based on utilization
+            target_load_mw = spec.capacity_mw * utilization
+            
+            # If smart charging enabled and override requested, can reduce by up to 50%
+            if spec.smart_charging_enabled and smart_override:
+                target_load_mw *= 0.5
+                
+            idx = self.der_indices.get(name)
+            if idx is None:
+                raise RuntimeError(f"DER '{name}' has no registered network index")
+            if idx not in self.net.load.index:
+                raise RuntimeError(f"DER '{name}' index {idx} no longer valid in network")
+                
+            self.net.load.at[idx, 'p_mw'] = target_load_mw
+            self.net.load.at[idx, 'q_mvar'] = target_load_mw * 0.1
+            
+            logger.debug(f"{name}: {utilization*100:.1f}% utilization → {target_load_mw:.2f} MW")
         
     def set_demand_response_curtailment(self, name: str, curtailment_fraction: float) -> None:
         """

@@ -20,6 +20,8 @@ wheels/
 .installed.cfg
 *.egg
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 venv/
@@ -37,6 +39,7 @@ env/
 
 # Project specific
 *.log
+logs/*.log
 .env
 .env.local
 .env.*.local
@@ -50,6 +53,7 @@ detailed_comparison.py
 minimal_test.py
 *_assessment.md
 BRUTAL_*.md
+GRID_CODE_REVIEW.md
 
 # React/Node
 website/node_modules/
@@ -65,3 +69,7 @@ grafana/data/
 
 # Docker
 .dockerignore
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb

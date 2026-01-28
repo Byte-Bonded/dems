@@ -59,7 +59,7 @@ class DEMSEnvironment(gym.Env):
         Storage at 50% capacity, loads at 50% of demand, frequency/voltage nominal
         """
         self.node_storage = np.full(self.num_nodes, self.max_storage_per_node * 0.5)
-        self.node_loads = np.random.uniform(
+        self.node_loads = self.np_random.uniform(
             self.base_demand_per_node * 0.3,
             self.base_demand_per_node * 0.7,
             self.num_nodes
@@ -120,7 +120,7 @@ class DEMSEnvironment(gym.Env):
         metrics = {}
 
         # Stochastically vary demand for realism
-        demand_variation = np.random.uniform(
+        demand_variation = self.np_random.uniform(
             -self.demand_variance,
             self.demand_variance,
             self.num_nodes

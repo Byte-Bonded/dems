@@ -84,7 +84,8 @@ class PowerFlowResult:
         """Check if system is in secure operating state"""
         return (self.converged and 
                 self.num_voltage_violations == 0 and 
-                self.num_line_overloads == 0)
+                self.num_line_overloads == 0 and
+                self.num_trafo_overloads == 0)
 
 
 class PowerFlowRunner:
@@ -205,16 +206,17 @@ class PowerFlowRunner:
             # Store original state
             original_state = net[elem_type].at[elem_idx, "in_service"]
             
-            # Apply contingency (take element out of service)
-            net[elem_type].at[elem_idx, "in_service"] = False
-            
-            # Run power flow
-            cont_result = self.run(net)
-            cont_result.error_message = f"Contingency: {elem_type}[{elem_idx}] out"
-            results.append(cont_result)
-            
-            # Restore original state
-            net[elem_type].at[elem_idx, "in_service"] = original_state
+            try:
+                # Apply contingency (take element out of service)
+                net[elem_type].at[elem_idx, "in_service"] = False
+                
+                # Run power flow
+                cont_result = self.run(net)
+                cont_result.error_message = f"Contingency: {elem_type}[{elem_idx}] out"
+                results.append(cont_result)
+            finally:
+                # Restore original state
+                net[elem_type].at[elem_idx, "in_service"] = original_state
             
         return results
     
@@ -334,24 +336,27 @@ def run_time_series_power_flow(
     original_loads = net.load.p_mw.copy()
     original_gens = net.gen.p_mw.copy()
     
-    for t in range(timesteps):
-        # Apply load profile
+    try:
+        for t in range(timesteps):
+            # Apply load profile
+            if load_profiles is not None:
+                net.load.p_mw = original_loads * load_profiles[t]
+                
+            # Apply generation profile
+            if gen_profiles is not None:
+                for i, gen_idx in enumerate(net.gen.index):
+                    if i < gen_profiles.shape[1]:
+                        net.gen.at[gen_idx, 'p_mw'] = gen_profiles[t, i]
+                        
+            # Run power flow
+            result = runner.run(net)
+            results.append(result)
+    finally:
+        # Restore original values (always, even on exception)
         if load_profiles is not None:
-            net.load.p_mw = original_loads * load_profiles[t]
-            
-        # Apply generation profile
+            net.load.p_mw = original_loads
         if gen_profiles is not None:
-            for i, gen_idx in enumerate(net.gen.index):
-                if i < gen_profiles.shape[1]:
-                    net.gen.at[gen_idx, 'p_mw'] = gen_profiles[t, i]
-                    
-        # Run power flow
-        result = runner.run(net)
-        results.append(result)
-        
-    # Restore original values
-    net.load.p_mw = original_loads
-    net.gen.p_mw = original_gens
+            net.gen.p_mw = original_gens
     
     return results
 

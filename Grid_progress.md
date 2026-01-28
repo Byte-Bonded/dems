@@ -55,7 +55,7 @@ Complete DER integration:
 
 ## Repository Structure (Final)
 
-```
+```text
 dems/
 ├── src/
 │   ├── grid.py              # Main DEMSGrid class

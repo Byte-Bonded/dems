@@ -312,7 +312,7 @@ class SuperGrid:
                 
                 # Check if within acceptable range
                 if vm_min >= 0.95 and vm_max <= 1.05:
-                    logger.info("  ✓ Voltage profile within limits")
+                    logger.info("  [OK] Voltage profile within limits")
                     break
                 
                 # Add targeted compensation (tighter thresholds for better final result)
@@ -394,8 +394,8 @@ class SuperGrid:
             self.dynamics.add_agc(area_id.value, participating_gens)
             logger.info(f"  - Area {area_id.value}: 10 generators, AGC enabled")
         
-        logger.info(f"✓ Initialized {len(self.dynamics.generators)} dynamic generators")
-        logger.info(f"✓ AGC controllers: {len(self.dynamics.agc_controllers)}")
+        logger.info(f"[OK] Initialized {len(self.dynamics.generators)} dynamic generators")
+        logger.info(f"[OK] AGC controllers: {len(self.dynamics.agc_controllers)}")
         
         return self.dynamics
     
