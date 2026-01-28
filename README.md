@@ -238,7 +238,7 @@ MIT License - see [LICENSE](LICENSE)
 
 ## 🤝 Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md)
+Contributions welcome! Please open issues and pull requests on GitHub.
 
 ---
 
