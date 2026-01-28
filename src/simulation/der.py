@@ -17,7 +17,7 @@ Thread Safety:
 import pandapower as pp
 import numpy as np
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from enum import Enum
 from datetime import datetime
