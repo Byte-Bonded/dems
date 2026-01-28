@@ -187,7 +187,7 @@ pytest --cov=src tests/
 ## 📚 Documentation
 
 - [DER Integration Guide](docs/DER_GUIDE.md) - How DER works with SuperGrid
-- [Project Changelog](PROJECT_CHANGELOG.md) - Development summary and milestones
+- [Project Changelog](Grid_progress.md) - Development summary and milestones
 
 ## 🎯 Current Status
 

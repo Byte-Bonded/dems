@@ -8,7 +8,7 @@ engine, use the src.simulation module.
 """
 
 import logging
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List
 from src.simulation import SuperGrid, PowerFlowRunner, PowerFlowResult
 from src.simulation.supergrid import AreaID, SuperGridConfig
 
