@@ -178,7 +178,7 @@ pytest
 pytest tests/test_dems.py -k TestIntegration -v
 
 # Run RL agent tests
-pytest tests/test_rl_agent.py -v
+pytest tests/test_dems.py::TestRLAgent -v
 
 # Coverage report
 pytest --cov=src tests/
