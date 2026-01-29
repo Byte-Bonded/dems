@@ -1,0 +1,48 @@
+# Prometheus Configuration for DEMS Grid Monitoring
+# Scrapes metrics from the DEMS simulation exporter
+
+global:
+  scrape_interval: 5s          # Scrape targets every 5 seconds
+  evaluation_interval: 5s       # Evaluate rules every 5 seconds
+  scrape_timeout: 4s           # Timeout after 4 seconds
+  external_labels:
+    monitor: 'dems-grid-monitor'
+    environment: 'simulation'
+
+# Alertmanager configuration (optional - add if needed)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Rule files for alerts
+rule_files:
+  # - "alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # DEMS Grid Simulation Metrics
+  - job_name: 'dems-simulation'
+    static_configs:
+      - targets: ['host.docker.internal:9136']  # Docker host gateway
+        labels:
+          instance: 'dems-grid-117bus'
+          grid_type: 'supergrid'
+    scrape_interval: 2s  # Fast scraping for real-time monitoring
+    scrape_timeout: 2s
+    metrics_path: '/metrics'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          instance: 'prometheus-server'
+
+  # Node Exporter (system metrics)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          instance: 'docker-host'

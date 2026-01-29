@@ -8,6 +8,7 @@ This orchestrator manages:
 - Dynamic simulations
 - State monitoring and logging
 - Time-series simulations
+- Prometheus metrics export (optional)
 """
 
 import logging
@@ -19,6 +20,13 @@ import json
 from src.grid import DEMSGrid
 from src.simulation.supergrid import SuperGridConfig
 from src.simulation.power_flow import PowerFlowResult
+
+# Optional Prometheus integration
+try:
+    from scripts.monitoring.prometheus_exporter import DEMSPrometheusExporter
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
 
 # Configure logging
 def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> logging.Logger:
@@ -87,7 +95,9 @@ class GridOrchestrator:
         self,
         config: Optional[SuperGridConfig] = None,
         log_level: str = "INFO",
-        log_file: Optional[str] = None
+        log_file: Optional[str] = None,
+        enable_prometheus: bool = False,
+        prometheus_port: int = 9136
     ):
         """
         Initialize the Grid Orchestrator
@@ -96,6 +106,8 @@ class GridOrchestrator:
             config: SuperGrid configuration
             log_level: Logging level
             log_file: Optional log file path
+            enable_prometheus: Enable Prometheus metrics export
+            prometheus_port: Port for Prometheus exporter
         """
         # Setup logging
         self.logger = setup_logging(log_level, log_file)
@@ -117,6 +129,17 @@ class GridOrchestrator:
         self.simulation_step = 0
         self.history: List[Dict[str, Any]] = []
         self.start_time = datetime.now()
+        
+        # Initialize Prometheus exporter (optional)
+        self.prometheus_exporter = None
+        if enable_prometheus:
+            if PROMETHEUS_AVAILABLE:
+                self.logger.info(f"Initializing Prometheus exporter on port {prometheus_port}...")
+                self.prometheus_exporter = DEMSPrometheusExporter(port=prometheus_port)
+                self.prometheus_exporter.start()
+                self.logger.info(f"[OK] Prometheus metrics available at http://localhost:{prometheus_port}/metrics")
+            else:
+                self.logger.warning("Prometheus exporter requested but not available. Install prometheus_client.")
         
     def log_power_flow_result(self, result: PowerFlowResult, prefix: str = "") -> None:
         """
@@ -208,6 +231,10 @@ class GridOrchestrator:
         
         if verbose:
             self.log_power_flow_result(result)
+        
+        # Update Prometheus metrics if enabled
+        if self.prometheus_exporter:
+            self.prometheus_exporter.update_from_power_flow_result(result)
             
         return result
     
@@ -221,6 +248,11 @@ class GridOrchestrator:
         self.logger.info("Retrieving grid state...")
         state = self.grid.get_state()
         self.log_grid_state(state)
+        
+        # Update Prometheus metrics if enabled
+        if self.prometheus_exporter:
+            self.prometheus_exporter.update_from_grid_state(state)
+        
         return state
     
     def run_area_analysis(self) -> None:
@@ -271,6 +303,10 @@ class GridOrchestrator:
             dr.get('available_mw', 0)
         )
         self.logger.info(f"Total DER:    {total_capacity:.2f} MW controllable capacity")
+        
+        # Update Prometheus DER metrics if enabled
+        if self.prometheus_exporter:
+            self.prometheus_exporter.update_from_der_status(der_status)
     
     def run_time_series_simulation(
         self,
