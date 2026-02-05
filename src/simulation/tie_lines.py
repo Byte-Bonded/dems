@@ -9,7 +9,7 @@ Tie-lines are the critical links between areas that:
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List
 from enum import Enum
 import numpy as np
 import pandapower as pp

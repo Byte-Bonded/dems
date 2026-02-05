@@ -4,7 +4,6 @@ All essential tests in a single file
 """
 
 import pytest
-import numpy as np
 
 from src.grid import DEMSGrid
 from src.core import EnergyManager, GridMonitor, GridManager
