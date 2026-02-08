@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Any
 import json
 
 from src.grid import DEMSGrid
-from src.simulation.supergrid import SuperGridConfig
+from src.simulation.kundur import KundurConfig
 from src.simulation.power_flow import PowerFlowResult
 
 # Configure logging
@@ -85,7 +85,7 @@ class GridOrchestrator:
     
     def __init__(
         self,
-        config: Optional[SuperGridConfig] = None,
+        config: Optional[KundurConfig] = None,
         log_level: str = "INFO",
         log_file: Optional[str] = None
     ):

@@ -1,17 +1,19 @@
 """
 DEMS Simulation Module
-Pandapower-based Tri-Area Super-Grid simulation engine
+Pandapower-based power system simulation engine
+
+Current System: Kundur Two-Area System (optimized for PSS testing)
+Legacy: IEEE 39-bus triple system (archived in legacy/ieee39bus/)
 
 Includes:
-- 117-bus SuperGrid (3× IEEE 39-bus)
+- Kundur Two-Area System (4 generators, 11 buses)
 - DER management (Solar, Wind, Battery, EV, DR)
 - Power flow analysis
-- Dynamic models (generators, AVR, governor, AGC)
+- Dynamic models (generators, AVR, governor, AGC, PSS)
 """
 
-from .supergrid import SuperGrid, AreaConfig
-from .tie_lines import TieLineConfig, create_tie_lines
-from .power_flow import PowerFlowRunner, PowerFlowResult
+from .kundur import KundurTwoAreaSystem, KundurConfig, AreaID, GeneratorParams, KUNDUR_GENERATORS
+from .power_flow import PowerFlowRunner, PowerFlowResult, PowerFlowConfig
 from .der import DERManager, DERType, DERSpec, DERState
 from .dynamics import (
     DynamicsCoordinator,
@@ -26,14 +28,16 @@ from .dynamics import (
 )
 
 __all__ = [
-    # Grid
-    "SuperGrid",
-    "AreaConfig", 
-    "TieLineConfig",
-    "create_tie_lines",
+    # Kundur System
+    "KundurTwoAreaSystem",
+    "KundurConfig",
+    "AreaID",
+    "GeneratorParams",
+    "KUNDUR_GENERATORS",
     # Power Flow
     "PowerFlowRunner",
     "PowerFlowResult",
+    "PowerFlowConfig",
     # DER
     "DERManager",
     "DERType",

@@ -1,22 +1,20 @@
 """
 DEMS Grid Module
-High-level interface to the Tri-Area Super-Grid simulation
+High-level interface to the Kundur Two-Area System
 
-This module provides a simplified API for interacting with the 
-117-bus Pandapower simulation. For direct access to the simulation
-engine, use the src.simulation module.
+Provides a simplified API for:
+- Running power flow simulations
+- Getting system state
+- Applying control actions
+- Managing DER (Solar, Wind, Battery, EV)
 """
 
 import logging
 from typing import Dict, Optional, List, Any
-from src.simulation import SuperGrid, PowerFlowRunner, PowerFlowResult
-from src.simulation.supergrid import AreaID, SuperGridConfig
-
-# Import decorators from utils (also available locally for backward compat)
+from src.simulation import KundurTwoAreaSystem, KundurConfig, AreaID, PowerFlowRunner, PowerFlowResult
 from src.utils.decorators import (
     log_operation,
     measure_performance,
-    validate_converged,
     safe_grid_operation,
 )
 
@@ -25,32 +23,31 @@ logger = logging.getLogger(__name__)
 
 class DEMSGrid:
     """
-    High-level wrapper for the DEMS Tri-Area Super-Grid
+    High-level wrapper for the Kundur Two-Area System
     
-    Provides simplified methods for:
-    - Running simulations
-    - Getting grid state
-    - Applying control actions
+    Simplified interface for power system control and RL training.
+    Optimized for PSS testing and inter-area oscillation studies.
     
     Example:
         >>> grid = DEMSGrid()
         >>> result = grid.run_power_flow()
         >>> if result.converged:
         ...     state = grid.get_state()
-        ...     print(f"Total load: {state['global_metrics']['total_load_mw']} MW")
+        ...     print(f"Tie-line flow: {state['system']['tie_line_flow_mw']} MW")
     """
     
-    def __init__(self, config: Optional[SuperGridConfig] = None):
+    def __init__(self, config: Optional[KundurConfig] = None, enable_der: bool = True):
         """
-        Create a DEMSGrid instance that composes the simulation SuperGrid and a PowerFlowRunner.
+        Create a DEMSGrid instance with Kundur Two-Area System
         
-        Parameters:
-            config (Optional[SuperGridConfig]): Optional configuration used to construct the underlying SuperGrid. If omitted, a default configuration is used.
+        Args:
+            config: System configuration (uses defaults if None)
+            enable_der: Enable DER (Solar, Wind, Battery, EV) integration
         """
-        self.supergrid = SuperGrid(config)
+        self.kundur = KundurTwoAreaSystem(config, enable_der=enable_der)
         self.power_flow_runner = PowerFlowRunner()
         self._last_result: Optional[PowerFlowResult] = None
-        logger.info("DEMSGrid initialized successfully")
+        logger.info("DEMSGrid initialized with Kundur Two-Area System")
         
     @log_operation
     @measure_performance
@@ -65,166 +62,139 @@ class DEMSGrid:
             PowerFlowResult with convergence status and metrics
         """
         self._last_result = self.power_flow_runner.run(
-            self.supergrid.net, 
+            self.kundur.net, 
             verbose=verbose
         )
         return self._last_result
         
-    @validate_converged
     def get_state(self) -> Dict:
         """
-        Return the global grid state.
-        
-        Includes per-area states, tie-line flows, and aggregate global metrics; reflects the current network model (run power flow to update results).
+        Get complete system state
         
         Returns:
-            Dict: Mapping containing area states, tie-line flow information, and global metrics.
+            Dict with generators, loads, tie-lines, areas, and DER states
         """
-        return self.supergrid.get_global_state()
+        return self.kundur.get_state()
         
-    @validate_converged
-    def get_area_state(self, area: str) -> Dict:
+    def get_area_state(self, area: AreaID) -> Dict:
         """
-        Retrieve the state metrics for the specified area.
+        Get state for a specific area
         
-        Parameters:
-            area (str): Area identifier — one of "A", "B", or "C".
-        
-        Returns:
-            Dictionary with area metrics
+        Args:
+            area: AreaID.AREA_1 or AreaID.AREA_2
             
-        Raises:
-            ValueError: If area is invalid
-            RuntimeError: If power flow has not converged
+        Returns:
+            Dict with area generation, load, and voltage
         """
-        try:
-            area_id = AreaID(area)
-        except ValueError:
-            raise ValueError(f"Invalid area '{area}'. Must be 'A', 'B', or 'C'")
-        return self.supergrid.get_area_state(area_id)
+        metrics = self.kundur.get_area_metrics()
+        return metrics.get(area.value, {})
+        
+    def get_tie_line_flows(self) -> Dict[str, float]:
+        """
+        Get power flow on tie-lines (critical for oscillation monitoring)
+        
+        Returns:
+            Dict with tie-line flows in MW and MVAR
+        """
+        return self.kundur.get_tie_line_flow()
         
     @safe_grid_operation
     @log_operation
-    def set_area_generation(self, area: str, target_mw: float) -> None:
+    def set_generator_power(self, gen_name: str, p_mw: float) -> bool:
         """
-        Set the total generation target for a specified area, distributing it across that area's controllable generators.
+        Set generator active power setpoint
         
         Args:
-            area: Area identifier ("A", "B", or "C")
-            target_mw: Total generation target in MW
+            gen_name: Generator name (G1, G2, G3, G4)
+            p_mw: Power setpoint in MW
             
-        Raises:
-            ValueError: If area is invalid or target_mw is negative
+        Returns:
+            True if successful, False otherwise
         """
-        # Validate inputs
-        try:
-            area_id = AreaID(area)
-        except ValueError:
-            raise ValueError(f"Invalid area '{area}'. Must be 'A', 'B', or 'C'")
-        
-        if target_mw < 0:
-            raise ValueError(f"Generation target must be non-negative, got {target_mw}")
-        
-        if target_mw > 5000:
-            logger.warning(f"Very high generation target for {area}: {target_mw} MW")
-        
-        self.supergrid.set_area_generation(area_id, target_mw)
+        return self.kundur.set_generator_setpoint(gen_name, p_mw)
         
     @safe_grid_operation
     @log_operation
-    def scale_area_load(self, area: str, scale_factor: float) -> None:
+    def apply_load_perturbation(self, area: AreaID, delta_mw: float) -> None:
         """
-        Scale all loads in the specified area by a multiplicative factor.
+        Apply load step change (for transient stability testing)
         
         Args:
-            area: Area identifier ("A", "B", or "C")
-            scale_factor: Multiplication factor (1.0 = no change)
+            area: Target area (AREA_1 or AREA_2)
+            delta_mw: Load change in MW (positive = increase)
+        """
+        self.kundur.apply_load_perturbation(area, delta_mw)
+        
+    def update_der_conditions(
+        self,
+        solar_irradiance: float = 800.0,
+        wind_speed: float = 12.0,
+        temperature: float = 25.0
+    ) -> None:
+        """
+        Update DER output based on environmental conditions
+        
+        Args:
+            solar_irradiance: Solar irradiance (0-1000 W/m²)
+            wind_speed: Wind speed (0-25 m/s)
+            temperature: Ambient temperature (°C)
+        """
+        self.kundur.update_der_conditions(solar_irradiance, wind_speed, temperature)
+        
+    def dispatch_battery(self, battery_name: str, power_mw: float) -> bool:
+        """
+        Dispatch battery storage
+        
+        Args:
+            battery_name: Battery name (BESS_A1, BESS_A2)
+            power_mw: Power setpoint (positive=discharge, negative=charge)
             
-        Raises:
-            ValueError: If area is invalid or scale_factor is out of range
-        """
-        # Validate inputs
-        try:
-            area_id = AreaID(area)
-        except ValueError:
-            raise ValueError(f"Invalid area '{area}'. Must be 'A', 'B', or 'C'")
-        
-        if scale_factor < 0:
-            raise ValueError(f"Scale factor must be non-negative, got {scale_factor}")
-        
-        if scale_factor > 3.0:
-            logger.warning(f"Very high scale factor for {area}: {scale_factor}")
-        
-        self.supergrid.scale_loads(area_id, scale_factor)
-        
-    @validate_converged
-    def get_tie_line_flows(self) -> List[Dict]:
-        """
-        Retrieve the current power flows across tie-lines connecting different grid areas.
-        
         Returns:
-            List of dictionaries representing tie-line power flow data.
+            True if successful
         """
-        return self.supergrid.get_tie_line_flows()
+        return self.kundur.dispatch_battery(battery_name, power_mw)
         
-    def get_generators(self) -> Dict[str, List[Dict]]:
-        """
-        Return information about controllable generators grouped by area.
-        
-        Returns:
-            dict: Mapping from area identifier (e.g., "A", "B", "C") to a list of generator information dictionaries for each controllable generator in that area.
-        """
-        return self.supergrid.get_controllable_generators()
+    def get_der_state(self) -> List[Dict]:
+        """Get current state of all DER units"""
+        return self.kundur.get_der_state()
         
     @log_operation
     def reset(self) -> None:
-        """
-        Reset the underlying grid to its stored base case.
-        
-        Restores the SuperGrid to its base-case configuration and clears the cached last power flow result on this DEMSGrid instance.
-        """
-        self.supergrid.reset_to_base_case()
+        """Reset grid to initial state"""
+        self.kundur = KundurTwoAreaSystem(
+            self.kundur.config, 
+            enable_der=self.kundur.enable_der
+        )
         self._last_result = None
         
     @property
     def is_converged(self) -> bool:
-        """
-        Indicates whether the most recent power flow run converged.
-        
-        Returns:
-            True if the last power flow result exists and is converged, False otherwise.
-        """
+        """Check if last power flow converged"""
         return self._last_result.converged if self._last_result else False
         
     @property
-    def is_secure(self) -> bool:
-        """
-        Report whether the most recent power flow result indicates the system is in a secure operating state.
+    def num_buses(self) -> int:
+        """Number of buses in the system"""
+        return len(self.kundur.net.bus)
         
-        Returns:
-            `true` if the last power flow result is secure, `false` otherwise.
-        """
-        return self._last_result.is_secure if self._last_result else False
+    @property
+    def num_generators(self) -> int:
+        """Number of generators in the system"""
+        return len(self.kundur.net.gen)
         
     def __repr__(self) -> str:
-        """
-        Return a concise string representation of the DEMSGrid that references its underlying SuperGrid.
+        return f"DEMSGrid({self.kundur})"
+
+
+def create_grid(config: Optional[KundurConfig] = None, enable_der: bool = True) -> DEMSGrid:
+    """
+    Create a DEMSGrid instance
+    
+    Args:
+        config: Kundur system configuration
+        enable_der: Enable DER integration
         
-        Returns:
-            repr_str (str): A string in the form "DEMSGrid(<SuperGrid_repr>)" where <SuperGrid_repr> is the underlying SuperGrid's representation.
-        """
-        return f"DEMSGrid({self.supergrid})"
-
-
-# Convenience function
-def create_grid(config: Optional[SuperGridConfig] = None) -> DEMSGrid:
-    """
-    Create a DEMSGrid wrapper configured with an optional SuperGridConfig.
-    
-    Parameters:
-        config (Optional[SuperGridConfig]): Optional configuration used to construct the underlying SuperGrid; when omitted, a default configuration is used.
-    
     Returns:
-        DEMSGrid: An initialized DEMSGrid instance ready for running power flows and interacting with the tri-area super-grid.
+        Initialized DEMSGrid
     """
-    return DEMSGrid(config)
+    return DEMSGrid(config, enable_der)

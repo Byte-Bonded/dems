@@ -4,7 +4,7 @@ Input validation utilities for grid operations
 """
 
 from typing import Union, Optional, Sequence
-from src.simulation.supergrid import AreaID
+from src.simulation.kundur import AreaID
 
 
 def validate_area_id(area_id: str, valid_areas: Optional[Sequence[str]] = None) -> str:
@@ -13,10 +13,10 @@ def validate_area_id(area_id: str, valid_areas: Optional[Sequence[str]] = None) 
     
     Args:
         area_id: The area ID to validate
-        valid_areas: Optional sequence of valid area IDs (defaults to A, B, C)
+        valid_areas: Optional sequence of valid area IDs (defaults to Area1, Area2)
         
     Returns:
-        The validated area ID (uppercase)
+        The validated area ID
         
     Raises:
         ValueError: If area_id is not valid
@@ -24,8 +24,7 @@ def validate_area_id(area_id: str, valid_areas: Optional[Sequence[str]] = None) 
     if valid_areas is None:
         valid_areas = [a.value for a in AreaID]
     
-    area_upper = area_id.upper()
-    if area_upper not in valid_areas:
+    if area_id not in valid_areas:
         raise ValueError(
             f"Invalid area_id '{area_id}'. Must be one of: {valid_areas}"
         )
