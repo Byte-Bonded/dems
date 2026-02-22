@@ -44,6 +44,10 @@ class PowerFlowConfig:
     
     # DC power flow specific
     trafo_model: str = "t"  # "t" or "pi" for transformer model
+    
+    # FIX P02: Configurable voltage thresholds (instead of hardcoded 0.95/1.05)
+    v_min_pu: float = 0.95
+    v_max_pu: float = 1.05
 
 
 @dataclass
@@ -162,7 +166,12 @@ class PowerFlowRunner:
                     voltage_depend_loads=self.config.voltage_depend_loads,
                 )
                 converged = net.converged
-                iterations = net.get("_ppc", {}).get("iterations", 0)
+                # FIX P03: Robust iteration count extraction
+                iterations = 0
+                if hasattr(net, '_ppc') and net._ppc is not None:
+                    iterations = net._ppc.get('iterations', 0)
+                elif hasattr(net, 'res_bus') and not net.res_bus.empty:
+                    iterations = self.config.max_iterations  # Converged but count unavailable
                 
         except pp.powerflow.LoadflowNotConverged as e:
             converged = False
@@ -277,18 +286,26 @@ class PowerFlowRunner:
             result.total_load_mw = float(net.res_load.p_mw.sum())
             result.total_load_mvar = float(net.res_load.q_mvar.sum())
             
-        # Losses (generation - load)
-        result.total_losses_mw = result.total_generation_mw - result.total_load_mw
-        result.total_losses_mvar = result.total_generation_mvar - result.total_load_mvar
+        # Losses: FIX P01/IEEE-31 — compute from I²R (line + trafo losses), not gen-load
+        line_losses_mw = 0.0
+        line_losses_mvar = 0.0
+        if not net.res_line.empty:
+            line_losses_mw += float(net.res_line.pl_mw.sum())
+            line_losses_mvar += float(net.res_line.ql_mvar.sum())
+        if not net.res_trafo.empty:
+            line_losses_mw += float(net.res_trafo.pl_mw.sum())
+            line_losses_mvar += float(net.res_trafo.ql_mvar.sum())
+        result.total_losses_mw = line_losses_mw
+        result.total_losses_mvar = line_losses_mvar
         
         # Voltage statistics
         result.min_voltage_pu = float(net.res_bus.vm_pu.min())
         result.max_voltage_pu = float(net.res_bus.vm_pu.max())
         result.avg_voltage_pu = float(net.res_bus.vm_pu.mean())
         
-        # Constraint violations
+        # Constraint violations — FIX P02: use configurable thresholds
         result.num_voltage_violations = int(
-            ((net.res_bus.vm_pu < 0.95) | (net.res_bus.vm_pu > 1.05)).sum()
+            ((net.res_bus.vm_pu < self.config.v_min_pu) | (net.res_bus.vm_pu > self.config.v_max_pu)).sum()
         )
         
         if not net.res_line.empty:

@@ -20,33 +20,26 @@ from src.utils.decorators import (
     safe_grid_operation,
 )
 
+import warnings
+
 logger = logging.getLogger(__name__)
 
 
 class DEMSGrid:
     """
-    High-level wrapper for the DEMS Tri-Area Super-Grid
+    High-level wrapper for the DEMS Tri-Area Super-Grid.
     
-    Provides simplified methods for:
-    - Running simulations
-    - Getting grid state
-    - Applying control actions
-    
-    Example:
-        >>> grid = DEMSGrid()
-        >>> result = grid.run_power_flow()
-        >>> if result.converged:
-        ...     state = grid.get_state()
-        ...     print(f"Total load: {state['global_metrics']['total_load_mw']} MW")
+    .. deprecated::
+        FIX BUG-19: This is a thin redundant wrapper over SuperGrid.
+        Prefer using SuperGrid directly for new code. This wrapper
+        is maintained for backward compatibility only.
     """
     
     def __init__(self, config: Optional[SuperGridConfig] = None):
-        """
-        Create a DEMSGrid instance that composes the simulation SuperGrid and a PowerFlowRunner.
-        
-        Parameters:
-            config (Optional[SuperGridConfig]): Optional configuration used to construct the underlying SuperGrid. If omitted, a default configuration is used.
-        """
+        warnings.warn(
+            "DEMSGrid is deprecated. Use SuperGrid directly.",
+            DeprecationWarning, stacklevel=2
+        )
         self.supergrid = SuperGrid(config)
         self.power_flow_runner = PowerFlowRunner()
         self._last_result: Optional[PowerFlowResult] = None

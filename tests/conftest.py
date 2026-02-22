@@ -20,9 +20,9 @@ def grid_manager():
 
 
 @pytest.fixture
-def rl_agent():
+def rl_agent(dems_environment):
     """Create RLAgent instance for tests"""
-    return RLAgent(observation_space_size=50, action_space_size=10)
+    return RLAgent(env=dems_environment)
 
 
 @pytest.fixture

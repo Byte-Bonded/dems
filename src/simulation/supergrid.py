@@ -176,7 +176,7 @@ class SuperGrid:
             ),
             TieLineSpec(
                 name="TL_AB_3",
-                from_area=AreaID.AREA_A, from_bus_local=39,
+                from_area=AreaID.AREA_A, from_bus_local=38,  # FIX T01: was 39, bus 39 doesn't exist (0-indexed: 0-38)
                 to_area=AreaID.AREA_B, to_bus_local=9,
                 length_km=150, rating_mva=500
             ),
@@ -250,11 +250,22 @@ class SuperGrid:
         net_c.bus["zone"] = 3
         
         # Merge networks: A + B first, then + C
+        # FIX BUG-26: Pass explicit params to silence pandapower 3.x warnings
         logger.info("Merging Area A and Area B...")
-        merged_ab = pp.merge_nets(net_a, net_b, validate=False)
+        merged_ab = pp.merge_nets(
+            net_a, net_b, validate=False,
+            net2_reindex_log_level="warning",
+            return_net2_reindex_lookup=False,
+            std_prio_on_net1=True,
+        )
         
         logger.info("Merging with Area C...")
-        self.net = pp.merge_nets(merged_ab, net_c, validate=False)
+        self.net = pp.merge_nets(
+            merged_ab, net_c, validate=False,
+            net2_reindex_log_level="warning",
+            return_net2_reindex_lookup=False,
+            std_prio_on_net1=True,
+        )
         
         # Update area configurations with actual bus ranges
         self._update_area_mappings()
@@ -303,9 +314,9 @@ class SuperGrid:
         # 3. Set generator voltage setpoints at 1.0 pu (nominal)
         self.net.gen['vm_pu'] = 1.00
         
-        # 4. Set slack bus voltage to 1.0 pu
-        ext_grid_idx = self.net.ext_grid.index[0]
-        self.net.ext_grid.at[ext_grid_idx, 'vm_pu'] = 1.00
+        # 4. Ext_grid vm_pu preserved from _configure_slack_bus() (FIX BUG-12)
+        #    FIX NEW-BUG-03: Do NOT override ext_grid vm_pu here — those
+        #    are set per IEEE 39-bus reference data in _configure_slack_bus().
         
         # 5. Run iterative voltage correction (up to 5 iterations)
         for iteration in range(5):
@@ -363,6 +374,15 @@ class SuperGrid:
         
         self.dynamics = DynamicsCoordinator()
         
+        # Ensure power flow is solved so we can initialize from steady state
+        has_pf = not self.net.res_bus.empty
+        if not has_pf:
+            try:
+                pp.runpp(self.net, algorithm='nr', max_iteration=50)
+                has_pf = self.net.converged
+            except Exception:
+                has_pf = False
+        
         # Add generators for each area with IEEE 39-bus parameters
         for area_id, area_config in self.areas.items():
             offset = area_config.bus_offset
@@ -387,6 +407,39 @@ class SuperGrid:
                     gen_id, global_bus, params,
                     with_avr=True, with_governor=True, with_pss=with_pss
                 )
+                
+                # Initialize from power flow steady-state (IEEE standard practice)
+                if has_pf:
+                    gen_mask = self.net.gen.bus == global_bus
+                    ext_mask = self.net.ext_grid.bus == global_bus
+                    if gen_mask.any():
+                        gen_idx = self.net.gen.index[gen_mask][0]
+                        P_mw = float(self.net.res_gen.at[gen_idx, 'p_mw'])
+                        Q_mvar = float(self.net.res_gen.at[gen_idx, 'q_mvar'])
+                        Vt = float(self.net.res_bus.at[global_bus, 'vm_pu'])
+                        Va_deg = float(self.net.res_bus.at[global_bus, 'va_degree'])
+                        self.dynamics.generators[gen_id].initialize(P_mw, Q_mvar, Vt, Va_deg)
+                        # FIX I03: Initialize exciter Efd and governor Pref from PF
+                        Pm0_pu = P_mw / data["MVA"]
+                        if gen_id in self.dynamics.exciters:
+                            Efd0 = self.dynamics.generators[gen_id].Eq_prime
+                            self.dynamics.exciters[gen_id].initialize_from_pf(Efd0, Vt)
+                        if gen_id in self.dynamics.governors:
+                            self.dynamics.governors[gen_id].initialize_from_pf(Pm0_pu)
+                    elif ext_mask.any():
+                        # ext_grid bus — initialize from ext_grid results
+                        ext_idx = self.net.ext_grid.index[ext_mask][0]
+                        P_mw = float(self.net.res_ext_grid.at[ext_idx, 'p_mw'])
+                        Q_mvar = float(self.net.res_ext_grid.at[ext_idx, 'q_mvar'])
+                        Vt = float(self.net.res_bus.at[global_bus, 'vm_pu'])
+                        Va_deg = float(self.net.res_bus.at[global_bus, 'va_degree'])
+                        self.dynamics.generators[gen_id].initialize(P_mw, Q_mvar, Vt, Va_deg)
+                        Pm0_pu = P_mw / data["MVA"]
+                        if gen_id in self.dynamics.exciters:
+                            Efd0 = self.dynamics.generators[gen_id].Eq_prime
+                            self.dynamics.exciters[gen_id].initialize_from_pf(Efd0, Vt)
+                        if gen_id in self.dynamics.governors:
+                            self.dynamics.governors[gen_id].initialize_from_pf(Pm0_pu)
                 
                 # Add to AGC (except slack generators)
                 if data["type"] != "Slack":
@@ -479,6 +532,9 @@ class SuperGrid:
         
         if add_default:
             self._add_default_der()
+        
+        # FIX T04: Update area mappings after DER may have added elements
+        self._update_area_mappings()
             
         return self.der_manager
 
@@ -604,21 +660,82 @@ class SuperGrid:
     
     def _configure_slack_bus(self) -> None:
         """
-        Configure the network slack/reference bus to Area A's bus 30 and set its voltage.
+        Configure the network slack/reference bus to Area A's bus 30.
         
-        Keeps only the first external grid element, assigns it to bus 30 (Area A slack) and sets its voltage setpoint to 1.03 pu.
+        FIX T02/IEEE-19: Keep ALL ext_grids (one per area) to preserve
+        ~2000 MVA of slack capacity. Removing them caused voltage collapse.
+        FIX T03: Ensure Area A ext_grid is at bus 30 (0-indexed).
         """
-        # In IEEE 39-bus, bus 30 (index 30) is typically the slack
-        # After merging, Area A's bus 30 becomes the system slack
-        slack_bus = 30  # Area A's slack bus
+        # In pandapower case39(), ext_grid is at bus 30 (0-indexed)
+        # After merging 3 areas, ext_grids are at buses 30, 69, 108
+        # Keep ALL of them — each area needs its slack source
+        # FIX BUG-12: Set per-ext_grid vm_pu from IEEE 39-bus reference data
+        # Area A slack at bus 30 (offset 0): Vg=1.030
+        # Area B slack at bus 69 (offset 39): Vg=1.030
+        # Area C slack at bus 108 (offset 78): Vg=1.030
+        # IEEE 39-bus Gen 2 (bus 31): Vg=0.982, Gen 10 (bus 29): Vg=1.048
+        # Ext_grids are at Gen 2 buses; use actual setpoints from reference
+        ieee39_ext_grid_vm = {30: 1.030, 69: 0.982, 108: 1.050}
+        for idx in self.net.ext_grid.index:
+            bus = self.net.ext_grid.at[idx, 'bus']
+            vm = ieee39_ext_grid_vm.get(bus, 1.03)
+            self.net.ext_grid.at[idx, 'vm_pu'] = vm
+            logger.debug(f"ext_grid {idx} at bus {bus}, vm_pu={vm}")
+
+    def step_ultc_tap_changers(self, deadband_pu: float = 0.005,
+                                v_setpoint_pu: float = 1.0,
+                                max_tap_step: int = 1) -> Dict[int, int]:
+        """
+        Simulate under-load tap changer (ULTC) logic for all transformers.
+        FIX BUG-06: IEEE 39-bus reference includes ULTC on transformers.
         
-        # Ensure the external grid element exists and is at the slack bus
-        if len(self.net.ext_grid) > 0:
-            # Keep only the first external grid (Area A's slack)
-            # Remove others that came from merging
-            self.net.ext_grid = self.net.ext_grid.iloc[:1].copy()
-            self.net.ext_grid.at[0, 'bus'] = slack_bus
-            self.net.ext_grid.at[0, 'vm_pu'] = 1.03  # Typical slack voltage
+        Adjusts tap positions based on secondary bus voltage deviation from
+        setpoint, with configurable deadband. Typical step delay of 30-60s
+        should be handled externally (call this once per delay period).
+        
+        Args:
+            deadband_pu: Voltage deadband (default ±0.5%)
+            v_setpoint_pu: Target secondary voltage (pu)
+            max_tap_step: Max tap positions to step per call
+            
+        Returns:
+            Dict mapping trafo index to new tap position
+        """
+        tap_changes = {}
+        if self.net is None or self.net.res_bus.empty:
+            return tap_changes
+            
+        for idx in self.net.trafo.index:
+            if not self.net.trafo.at[idx, 'in_service']:
+                continue
+            lv_bus = int(self.net.trafo.at[idx, 'lv_bus'])
+            if lv_bus not in self.net.res_bus.index:
+                continue
+            v_sec = float(self.net.res_bus.at[lv_bus, 'vm_pu'])
+            error = v_sec - v_setpoint_pu
+            
+            current_tap = int(self.net.trafo.at[idx, 'tap_pos']) if 'tap_pos' in self.net.trafo.columns else 0
+            
+            if error < -deadband_pu:
+                # Voltage too low → raise tap (increase secondary voltage)
+                new_tap = current_tap + min(max_tap_step, 1)
+            elif error > deadband_pu:
+                # Voltage too high → lower tap 
+                new_tap = current_tap - min(max_tap_step, 1)
+            else:
+                new_tap = current_tap
+            
+            # Clamp to valid tap range
+            tap_min = int(self.net.trafo.at[idx, 'tap_min']) if 'tap_min' in self.net.trafo.columns else -10
+            tap_max = int(self.net.trafo.at[idx, 'tap_max']) if 'tap_max' in self.net.trafo.columns else 10
+            new_tap = max(tap_min, min(tap_max, new_tap))
+            
+            if new_tap != current_tap:
+                self.net.trafo.at[idx, 'tap_pos'] = new_tap
+                tap_changes[idx] = new_tap
+                logger.debug(f"ULTC trafo {idx}: tap {current_tap} → {new_tap} (V_sec={v_sec:.4f})")
+        
+        return tap_changes
             
     def get_area_state(self, area_id: AreaID) -> Dict:
         """
@@ -751,7 +868,14 @@ class SuperGrid:
         # Calculate global metrics
         total_gen = sum(a["total_generation_mw"] for a in area_states.values())
         total_load = sum(a["total_load_mw"] for a in area_states.values())
-        total_losses = total_gen - total_load
+        # FIX BUG-03: Compute actual I²R losses from res_line + res_trafo
+        if (hasattr(self.net, 'res_line') and len(self.net.res_line) > 0
+                and 'pl_mw' in self.net.res_line.columns):
+            total_losses = self.net.res_line.pl_mw.sum()
+            if hasattr(self.net, 'res_trafo') and len(self.net.res_trafo) > 0:
+                total_losses += self.net.res_trafo.pl_mw.sum()
+        else:
+            total_losses = total_gen - total_load  # fallback before first PF
         
         # Check for any violations
         voltage_violations = any(

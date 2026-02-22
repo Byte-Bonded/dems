@@ -5,8 +5,22 @@ Reusable function decorators for logging, validation, and error handling
 
 import logging
 import time
+import sys
 from functools import wraps
-from typing import Callable, Any, Optional, TypeVar, ParamSpec
+from typing import Callable, Any, Optional, TypeVar
+
+if sys.version_info >= (3, 10):
+    from typing import ParamSpec
+else:
+    try:
+        from typing_extensions import ParamSpec
+    except ImportError:
+        # Fallback: define a minimal ParamSpec stub for Python 3.9
+        class _ParamSpecStub:
+            def __init__(self, name):
+                self.args = Any
+                self.kwargs = Any
+        ParamSpec = _ParamSpecStub  # type: ignore
 
 P = ParamSpec('P')
 T = TypeVar('T')

@@ -23,7 +23,7 @@ from src.simulation.power_flow import PowerFlowResult
 
 # Optional Prometheus integration
 try:
-    from scripts.monitoring.prometheus_exporter import DEMSPrometheusExporter
+    from src.monitoring.prometheus_exporter import DEMSPrometheusExporter
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
@@ -79,9 +79,11 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> lo
     return logging.getLogger(__name__)
 
 
-class GridOrchestrator:
+class MonitoringOrchestrator:
     """
-    Main orchestrator for DEMS grid operations
+    Main orchestrator for DEMS grid monitoring and logging operations.
+    FIX BUG-18: Renamed from GridOrchestrator to avoid name collision
+    with src.simulation.orchestrator.GridOrchestrator (RL environment).
     
     Manages the complete lifecycle of grid simulation including:
     - Initialization
@@ -434,7 +436,7 @@ def main():
     
     # Create orchestrator with file logging
     log_file = f"dems_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    orchestrator = GridOrchestrator(
+    orchestrator = MonitoringOrchestrator(
         log_level="INFO",
         log_file=log_file
     )
@@ -490,3 +492,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# FIX BUG-18: Backward-compat alias for old import name
+GridOrchestrator = MonitoringOrchestrator

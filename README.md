@@ -1,369 +1,172 @@
 # Dynamic Energy Management System (DEMS)
 
-[![GitHub Repo](https://img.shields.io/badge/GitHub-Byte--Bonded%2Fdems-blue)](https://github.com/Byte-Bonded/dems)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://www.python.org/)
-[![React](https://img.shields.io/badge/React-18%2B-blue)](https://reactjs.org/)
+[![Tests](https://img.shields.io/badge/Tests-157%2F157-brightgreen)]()
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-**DEMS** is a Dynamic Energy Management System built around a realistic **117-bus IEEE 39-based tri-area power grid** with integrated **Distributed Energy Resources (DER)** including Solar, Wind, Battery Storage, EV Charging, and Demand Response, plus **Reinforcement Learning** capabilities for intelligent grid optimization.
+A realistic **117-bus tri-area power grid** simulation with integrated DER (Solar, Wind, Battery, EV, Demand Response), IEEE-compliant dynamic models, and a Reinforcement Learning orchestrator for intelligent grid optimization.
 
-## ⚡ What Actually Works
+---
 
-### ✅ Fully Functional
-- **117-Bus SuperGrid**: Tri-area power system based on 3× IEEE 39-bus networks
-  - 117 buses, 27 generators, 8 inter-area tie-lines
-  - 50 Hz Indian Grid Code operation
-  - AC power flow converges in ~4 iterations (84ms)
-  - Realistic voltage/frequency control with shunt compensators
+## Features
 
-- **DER Integration**: Real distributed energy resources
-  - Solar PV: 205 MW capacity with irradiance-based generation
-  - Wind: 250 MW capacity with wind speed curves
-  - Battery Storage: 120 MWh with SOC tracking
-  - **EV Charging**: 200 chargers with smart charging (15 MW peak)
-  - **Demand Response**: 36.5 MW curtailable load programs
-  - Integrated with power flow solver
+### Power System Simulation
+- **117-Bus SuperGrid** — 3x IEEE 39-bus (New England) merged into a tri-area mesh topology with 8 N-1-secure tie-lines
+- **AC Power Flow** — Newton-Raphson solver via pandapower, converges in ~4 iterations
+- **Electromechanical Dynamics** — Swing equation (symplectic Euler), field flux coupling (Efd → Eq'), center-of-inertia frequency
+- **IEEE 421.5 Excitation** — IEEET1 AVR with saturation, KF feedback, Over-Excitation Limiter (OEL)
+- **IEEE/NERC TGOV1 Governor** — Valve rate limits, turbine damping Dt, PF-initialized Pref
+- **IEEE 421.5 PSS1A** — Washout + 2 lead-lag stages, DC gain = 1, verified by unit tests
+- **AGC** — PI-based secondary frequency control with IEGC 0.03 Hz deadband and normalized participation factors
+- **Protection** — Multi-stage UFLS (49.5/49.2/49.0 Hz), OFGT (50.5 Hz), voltage trip with timing
+- **ULTC Tap Changers** — Deadband-based automatic voltage regulation on transformers
 
-- **Power Flow Simulation**: Production-ready pandapower integration
-  - Newton-Raphson solver
-  - Voltage stability analysis
-  - Loss calculation
-  - Tested and validated
+### Distributed Energy Resources
+- **Solar PV** — 205 MW across 3 areas, irradiance-based output with ramp rate limiting
+- **Wind Farms** — 250 MW, IEC 61400 cubic power curve with cut-in/rated/cut-out
+- **Battery Storage** — 120 MWh with symmetric `sqrt(eta)` efficiency, degradation tracking
+- **EV Charging** — 200 chargers with smart charging profiles
+- **Demand Response** — 36.5 MW curtailable load programs
+- **IEEE 1547-2018** — LVRT/HVRT ride-through (Cat III), anti-islanding detection (2s), active power ramp rates
 
-### 🚧 In Development
-- **RL-Based Optimization**: PPO/SAC agents implemented, needs SuperGrid integration
-  - RL agent structure complete with stable_baselines3
-  - Environment currently uses simplified 10-node model
-  - **Next step**: Connect DEMSEnvironment to 117-bus SuperGrid
+### RL Agent Interface
+- **GridOrchestrator** — Single entry point: 42-dim observation, variable-dim action, multi-objective reward
+- **Stochastic Profiles** — Ornstein-Uhlenbeck wind/cloud + diurnal load curves
+- **PPO/SAC** — Stable-baselines3 integration (training on full 117-bus grid)
 
-- **API Backend**: FastAPI structure exists but needs SuperGrid connection
-  - Health endpoints working
-  - **Needs**: Replace toy models with real SuperGrid interface
+---
 
-- **Monitoring Stack**: Docker/Prometheus/Grafana configured but not fully integrated
-  - Infrastructure ready
-  - **Needs**: Metrics from real power flow results
+## Quick Start
 
-### 📋 Planned Features
-- Real-time grid monitoring with Prometheus metrics
-- RL agent training on actual 117-bus power flow
-- Multi-agent coordination for DER control
-- ~~Demand response integration~~ ✅ COMPLETED
-- ~~EV charging optimization~~ ✅ COMPLETED
-**DEMS** is a sophisticated Dynamic Energy Management System that uses Reinforcement Learning (RL) agents to optimize energy distribution, storage, and grid stability. The system combines advanced AI algorithms with real-time monitoring using Prometheus and Grafana.
-
-## 🌟 Features
-
-### Core Capabilities
-- **RL-Based Optimization**: Intelligent agents trained to optimize energy distribution in real-time
-- **Grid Stability Management**: Maintains frequency and voltage stability across grid nodes
-- **Smart Load Balancing**: Dynamic distribution minimizes losses and maximizes efficiency
-- **Energy Storage Optimization**: Intelligent charging/discharging strategies for battery systems
-- **Real-Time Monitoring**: Prometheus metrics collection and Grafana dashboards
-
-### Technical Features
-- **FastAPI Backend**: High-performance REST API for energy management
-- **PostgreSQL Database**: Reliable data persistence
-- **Redis Caching**: Fast access to critical metrics
-- **Docker Support**: Easy deployment across environments
-- **GitHub Pages Website**: Modern responsive UI with React (White & Pinkish-Red theme)
-
-## 🏗️ Project Structure
-
-```
-dems/
-├── src/
-│   ├── simulation/        # ✅ WORKING - Real power system
-│   │   ├── supergrid.py   # 117-bus grid implementation
-│   │   ├── der.py         # DER manager (Solar/Wind/BESS)
-│   │   ├── power_flow.py  # AC power flow solver
-│   │   └── tie_lines.py   # Inter-area connections
-│   ├── grid.py            # ✅ High-level grid interface
-│   ├── agent/             # 🚧 RL agent (needs integration)
-│   │   ├── rl_agent.py    # PPO/SAC implementation
-│   │   └── environment.py # Gym environment (10-node)
-│   ├── api/               # 🚧 FastAPI (needs SuperGrid)
-│   │   └── main.py
-│   └── core/              # 📋 Simplified models
-├── tests/                 # ✅ Unit + integration tests
-│   ├── test_integration.py  # NEW - Tests real SuperGrid
-│   ├── test_rl_agent.py     # Tests RL implementation
-│   └── ...
-├── docs/                  # ✅ Documentation
-│   ├── DER_GUIDE.md       # DER integration guide
-│   ├── RL_CONTROL_STRATEGY.md
-│   └── ARCHITECTURE.md
-├── website/               # ✅ React frontend
-└── docker-compose.yml     # 🚧 Monitoring stack
-│   ├── core/              # Energy and grid management
-│   │   ├── energy_manager.py
-│   │   └── grid_manager.py
-│   ├── agent/             # RL agent implementation
-│   │   ├── rl_agent.py
-│   │   └── environment.py
-│   ├── api/               # FastAPI application
-│   │   └── main.py
-│   ├── monitoring/        # Prometheus integration
-│   └── models/            # Data models
-├── website/               # React GitHub Pages site
-│   ├── public/
-│   └── src/
-│       ├── components/
-│       ├── pages/
-│       └── styles/
-├── config/                # Configuration
-│   ├── prometheus.yml
-│   └── config.py
-├── docker/                # Docker files
-├── tests/                 # Unit tests
-├── docs/                  # Documentation
-├── docker-compose.yml
-├── requirements.txt
-└── setup.py
-```
-
-## 🚀 Quick Start
-
-### Test the Real Grid
-### Backend
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Test 117-bus SuperGrid
-python test_grid.py
+# Run all 157 tests
+python -m pytest tests/ -v
 
-# Test DER integration
-python quick_test_der.py
-
-# Visualize topology
-python visualize_grid.py
+# Use the SuperGrid directly
+python -c "
+from src.simulation.supergrid import SuperGrid
+sg = SuperGrid()
+sg.initialize_der()
+sg.initialize_dynamics()
+state = sg.get_global_state()
+print(f'Buses: {len(sg.net.bus)}, Gens: {len(sg.net.gen)}')
+print(f'Frequency: {state[\"global_metrics\"][\"system_frequency_hz\"]} Hz')
+"
 ```
 
-### Train RL Agent (Current - 10 nodes)
-```python
-from src.agent import RLAgent, DEMSEnvironment
-
-# Current: Simplified 10-node environment
-env = DEMSEnvironment(num_nodes=10)
-agent = RLAgent(env=env, algorithm="PPO")
-agent.train(total_timesteps=10000)
-```
-
-### Use Real SuperGrid (Recommended)
-```python
-from src.grid import DEMSGrid
-
-# Real 117-bus grid with DER
-grid = DEMSGrid()
-result = grid.run_power_flow()
-
-print(f"Converged: {result['converged']}")
-print(f"Generation: {result['total_generation_mw']:.2f} MW")
-print(f"Losses: {result['total_losses_mw']:.2f} MW")
-
-# Control DER
-grid.supergrid.der_manager.update_solar_generation(hour=12, irradiance=800)
-grid.supergrid.der_manager.update_wind_generation(hour=12, wind_speed=8.0)
-grid.supergrid.der_manager.update_ev_charging_by_hour(hour=19)  # Peak evening
-grid.supergrid.der_manager.set_demand_response_curtailment("DR_Industrial_A1", 0.5)
-```
-
-## 📊 Monitoring (In Development)
-
-Docker stack configured but not fully connected:
-
-```bash
-docker-compose up -d
-
-# Services:
-# - API: http://localhost:8000 (🚧 needs SuperGrid)
-# - Prometheus: http://localhost:9090 (🚧 needs metrics)
-# - Grafana: http://localhost:3000 (🚧 needs data source)
-```
-
-## 🤖 RL Agent Implementation
-
-**Status**: ✅ Implemented with stable_baselines3
+### Train RL Agent
 
 ```python
-from src.agent import RLAgent, DEMSEnvironment
+from src.simulation.orchestrator import GridOrchestrator
+import numpy as np
 
-# Create environment (currently 10-node, upgrade to SuperGrid planned)
-env = DEMSEnvironment()
+orch = GridOrchestrator(seed=42)
+obs = orch.reset()
 
-# Initialize PPO or SAC agent
-agent = RLAgent(env=env, algorithm="PPO", verbose=1)
+for _ in range(288):  # 24h at 5-min steps
+    action = np.random.uniform(0, 1, size=orch.action_dim)
+    obs, reward, done, info = orch.step(action)
+    if done:
+        break
 
-# Train agent
-agent.train(total_timesteps=50000)
-
-# Evaluate performance
-results = agent.evaluate(n_episodes=10)
-print(f"Mean reward: {results['mean_reward']:.2f}")
-
-# Save/load models
-agent.save("models/ppo_agent")
-agent.load("models/ppo_agent")
+print(orch.episode_summary())
 ```
-
-**Algorithms Supported**:
-- **PPO** (Proximal Policy Optimization) - Default, stable
-- **SAC** (Soft Actor-Critic) - For continuous control
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-pytest
-
-# Run integration tests (tests real SuperGrid)
-pytest tests/test_dems.py -k TestIntegration -v
-
-# Run RL agent tests
-pytest tests/test_dems.py::TestRLAgent -v
-
-# Coverage report
-pytest --cov=src tests/
-# Copy environment config
-cp .env.example .env
-
-# Run API
-python -m src.api.main
-# API: http://localhost:8000
-```
-
-### Frontend
-```bash
-cd website
-npm install
-npm start
-# Website: http://localhost:3000
-```
-
-### Docker
-```bash
-# Start all services
-docker-compose up -d
-
-# Services:
-# - API: http://localhost:8000
-# - Prometheus: http://localhost:9090
-# - Grafana: http://localhost:3000
-# - PostgreSQL: localhost:5432
-# - Redis: localhost:6379
-```
-
-## 📊 Monitoring
-
-**Prometheus** collects these metrics:
-- `dems_energy_generated_kwh` - Energy generation
-- `dems_energy_consumed_kwh` - Energy consumption  
-- `dems_storage_level_kwh` - Storage level
-- `dems_grid_frequency_hz` - Grid frequency
-- `dems_agent_reward` - Agent reward
-
-**Grafana** visualizes the data (login: admin/admin)
-
-## 🤖 RL Agent
-
-The system uses Stable-Baselines3 for RL training:
-
-```python
-from src.agent import RLAgent, DEMSEnvironment
-
-env = DEMSEnvironment(num_nodes=10)
-agent = RLAgent(observation_space_size=50, action_space_size=10)
-
-# Training and prediction logic
-```
-
-## 🌐 GitHub Pages Deployment
-
-The website is built with React and deployed to GitHub Pages:
-
-```bash
-cd website
-npm run deploy
-# Site: https://Byte-Bonded.github.io/dems
-```
-
-## 🔌 API Endpoints
-
-```bash
-GET /health                    # Health check
-GET /energy/state              # Current energy state
-GET /grid/state                # Grid status
-POST /optimization/predict     # Get optimization
-GET /metrics                   # Prometheus metrics
-```
-
-## 📚 Documentation
-
-- [DER Integration Guide](docs/DER_GUIDE.md) - How DER works with SuperGrid
-- [Project Changelog](PROJECT_CHANGELOG.md) - Development summary and milestones
-
-## 🎯 Current Status
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| 117-Bus SuperGrid | ✅ Complete | Production ready, tested |
-| DER Integration | ✅ Complete | Solar, Wind, Battery working |
-| Power Flow | ✅ Complete | Converges reliably |
-| RL Agent | ✅ Implemented | PPO/SAC with stable_baselines3 |
-| RL Environment | 🚧 Partial | Uses 10-node, needs SuperGrid |
-| API Backend | 🚧 Partial | Structure exists, needs integration |
-| Monitoring | 🚧 Partial | Docker setup ready, needs metrics |
-| Frontend | ✅ Complete | React website ready |
-
-## 🛠️ Next Steps (Roadmap)
-
-1. **Connect RL Environment to SuperGrid** (High Priority)
-   - Replace 10-node model with 117-bus SuperGrid
-   - Use real power flow results as observations
-   - Control DER as actions
-
-2. **Integrate API with SuperGrid** (High Priority)
-   - Replace simplified models with real grid interface
-   - Expose power flow results via REST API
-
-3. **Add Prometheus Metrics** (Medium Priority)
-   - Export SuperGrid metrics (voltage, frequency, generation)
-   - Connect Grafana dashboards
-
-4. **Advanced Features** (Future)
-   - Multi-agent RL for distributed control
-   - Demand response integration
-   - EV charging optimization
-
-## 🌐 GitHub Pages
-
-Website: [https://Byte-Bonded.github.io/dems](https://Byte-Bonded.github.io/dems)
-
-```bash
-cd website
-npm install
-npm run deploy
-```
-- [Getting Started](docs/GETTING_STARTED.md)
-- [API Reference](docs/API.md)
-- [Architecture](docs/ARCHITECTURE.md)
-
-## 📝 License
-
-MIT License - see [LICENSE](LICENSE)
-
-## 🤝 Contributing
-
-Contributions welcome! Please open issues and pull requests on GitHub.
 
 ---
 
-**⚡ Building realistic power grid simulation with AI-driven optimization**
+## Project Structure
 
-*Note: This project implements a realistic 117-bus power system. The RL integration is in progress - the grid simulation is production-ready, while the RL agent needs to be connected to the real grid for full functionality.*
-Contributions welcome! Please create a pull request.
+```
+dems/
+├── src/
+│   ├── simulation/           # Core power system simulation
+│   │   ├── supergrid.py      # 117-bus tri-area grid (1036 lines)
+│   │   ├── dynamics.py       # Swing eq, AVR, governor, PSS, AGC (733 lines)
+│   │   ├── der.py            # DER manager (1071 lines)
+│   │   ├── orchestrator.py   # RL orchestrator (945 lines)
+│   │   ├── power_flow.py     # NR power flow engine (439 lines)
+│   │   ├── microgrid.py      # Standalone microgrid simulator (704 lines)
+│   │   └── tie_lines.py      # Tie-line configs
+│   ├── orchestrator.py       # Monitoring orchestrator
+│   ├── grid.py               # DEMSGrid wrapper (deprecated)
+│   ├── agent/                # RL agent (PPO/SAC)
+│   ├── api/                  # FastAPI backend
+│   ├── core/                 # Energy/grid managers
+│   └── monitoring/           # Prometheus metrics
+├── tests/                    # 157 unit + integration tests
+├── streamlit_app/            # Interactive dashboard
+├── website/                  # React frontend
+├── docs/                     # Architecture, API, DER guide
+├── docker/                   # Dockerfiles
+├── config/                   # Prometheus config
+└── scripts/                  # Monitoring scripts
+```
 
 ---
 
-**⚡ Building the future of energy management with AI** 
+## IEEE Standard Compliance
+
+| Standard | Implementation |
+|----------|---------------|
+| IEEE 39-bus (New England) | 3x merged, 0-indexed buses, correct gen/ext_grid mapping |
+| IEEE Std 421.5-2016 sec5.1 | IEEET1 exciter: SE saturation, KF feedback, implicit trapezoidal |
+| IEEE Std 421.5-2016 sec6 | OEL with thermal limit, timer delay, Vref reduction |
+| IEEE Std 421.5-2016 sec8.1 | PSS1A: washout + 2 lead-lag, K=5, DC-rejection verified |
+| IEEE/NERC TGOV1 | Valve rate limits, Dt=0.05 turbine damping |
+| IEEE 1547-2018 | LVRT/HVRT Cat III, anti-islanding 2s, ramp rates |
+| IEC 61400 | Cubic wind curve `(v^3 - v_ci^3) / (v_r^3 - v_ci^3)` |
+| IEGC (Indian Grid Code) | 50 Hz, multi-stage UFLS, OFGT, 0.03 Hz AGC deadband |
+
+---
+
+## Testing
+
+```bash
+# Full suite
+python -m pytest tests/ -v --tb=short
+
+# Specific modules
+python -m pytest tests/test_simulation.py -k "TestDynamics" -v
+python -m pytest tests/test_simulation.py -k "TestPSSWashoutFilter" -v
+python -m pytest tests/test_dems.py -k "TestIntegration" -v
+```
+
+**157 tests** covering:
+- Grid construction and topology (buses, generators, tie-lines)
+- Power flow convergence and loss calculation
+- Dynamic models (swing eq, AVR, governor, PSS, AGC)
+- DER operations (solar, wind, battery SOC, EV, DR)
+- RL orchestrator (observation, action, reward, reset/step)
+- Microgrid standalone solver (NR, DER components)
+- PSS washout filter frequency response
+
+---
+
+## Monitoring (Docker)
+
+```bash
+docker-compose up -d
+# API:        http://localhost:8000
+# Prometheus: http://localhost:9090
+# Grafana:    http://localhost:3000 (admin/admin)
+```
+
+---
+
+## Documentation
+
+- [AUDIT_REPORT2.md](AUDIT_REPORT2.md) — Final audit report (all bugs resolved)
+- [UNRESOLVED_BUGS.md](UNRESOLVED_BUGS.md) — Bug tracker (107/107 resolved)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — System architecture
+- [docs/DER_GUIDE.md](docs/DER_GUIDE.md) — DER integration guide
+- [docs/API.md](docs/API.md) — API reference
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guidelines
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE)

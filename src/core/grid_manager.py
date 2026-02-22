@@ -376,9 +376,12 @@ class GridManager(GridMonitor):
         """
         Get grid state including num_nodes for backward compatibility.
         
+        FIX A03: Was calling non-existent get_current_state().
+        Now uses get_statistics() which actually exists.
+        
         Returns:
             Dict containing grid state with num_nodes key
         """
-        state = self.get_current_state()
+        state = self.get_statistics()
         state["num_nodes"] = self.num_nodes
         return state

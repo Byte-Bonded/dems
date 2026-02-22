@@ -69,6 +69,8 @@ class DERSpec:
     curtailable_fraction: Optional[float] = None  # 0-1
     response_time_minutes: Optional[float] = None
     incentive_price_per_mwh: Optional[float] = None
+    # FIX BUG-24: DER active power ramp rate (IEEE 1547-2018)
+    ramp_rate_mw_per_min: Optional[float] = None  # None = no limit
 
 
 @dataclass
@@ -116,12 +118,13 @@ class BatteryState:
         Returns:
             Actual energy delivered/absorbed after efficiency
         """
-        # Apply efficiency losses
+        # FIX BUG-15: Symmetric battery efficiency using sqrt(η_rt)
+        sqrt_eff = np.sqrt(self.round_trip_efficiency)
         if delta_energy_mwh > 0:  # Discharging
-            actual_energy = delta_energy_mwh
-            soc_delta = -delta_energy_mwh / self.capacity_mwh
+            actual_energy = delta_energy_mwh / sqrt_eff
+            soc_delta = -actual_energy / self.capacity_mwh
         else:  # Charging
-            actual_energy = delta_energy_mwh * self.round_trip_efficiency
+            actual_energy = delta_energy_mwh * sqrt_eff
             soc_delta = -actual_energy / self.capacity_mwh
         
         # Update SOC with bounds
@@ -173,6 +176,13 @@ class DERManager:
         self.battery_soc: Dict[str, float] = {}  # name -> state of charge (legacy)
         self._battery_states: Dict[str, BatteryState] = {}  # Enhanced battery tracking
         self._lock = threading.RLock()  # Reentrant lock for thread safety
+        # FIX BUG-13: Dict-based spec lookup for O(1) access
+        self._spec_by_name: Dict[str, DERSpec] = {}
+        # FIX BUG-24: Track last outputs for ramp rate limiting
+        self._last_outputs: Dict[str, float] = {}
+        # FIX BUG-25: Anti-islanding detection state
+        self._islanding_timers: Dict[str, float] = {}
+        self._islanded_ders: Dict[str, bool] = {}
         
     def add_solar_pv(
         self, 
@@ -180,7 +190,7 @@ class DERManager:
         capacity_mw: float, 
         name: str,
         area_id: str,
-        panel_area_m2: float = 1000.0,
+        panel_area_m2: Optional[float] = None,
         efficiency: float = 0.20
     ) -> int:
         """
@@ -197,6 +207,11 @@ class DERManager:
         Returns:
             int: Index of the created static generator element in the pandapower network.
         """
+        # FIX U01: Compute panel_area from capacity if not provided
+        # P = Area × 1kW/m² × efficiency → Area = P / (1kW/m² × efficiency)
+        if panel_area_m2 is None:
+            panel_area_m2 = (capacity_mw * 1e6) / (1000.0 * efficiency)
+            logger.debug(f"{name}: Computed panel_area={panel_area_m2:.0f} m² from {capacity_mw} MW")
         spec = DERSpec(
             der_type=DERType.SOLAR_PV,
             bus=bus,
@@ -207,9 +222,9 @@ class DERManager:
             efficiency=efficiency
         )
         self.der_specs.append(spec)
+        self._spec_by_name[spec.name] = spec
         
         # Add as controllable static generator (sgen)
-        # Start with 50% capacity (midday-ish generation)
         idx = pp.create_sgen(
             self.net,
             bus=bus,
@@ -258,6 +273,7 @@ class DERManager:
             num_turbines=num_turbines
         )
         self.der_specs.append(spec)
+        self._spec_by_name[spec.name] = spec
         
         # Add as controllable static generator
         # Start with 40% capacity factor (typical wind)
@@ -310,7 +326,16 @@ class DERManager:
             initial_soc=initial_soc
         )
         self.der_specs.append(spec)
+        self._spec_by_name[spec.name] = spec
         self.battery_soc[name] = initial_soc
+        
+        # FIX I04: Populate _battery_states for enhanced tracking
+        self._battery_states[name] = BatteryState(
+            name=name,
+            soc=initial_soc,
+            capacity_mwh=energy_mwh,
+            nominal_capacity_mwh=energy_mwh,
+        )
         
         # Add as storage element
         idx = pp.create_storage(
@@ -371,6 +396,7 @@ class DERManager:
             smart_charging_enabled=smart_charging_enabled
         )
         self.der_specs.append(spec)
+        self._spec_by_name[spec.name] = spec
         
         # Add as controllable load
         # Start with 30% utilization (typical for daytime)
@@ -431,6 +457,7 @@ class DERManager:
             incentive_price_per_mwh=incentive_price_per_mwh
         )
         self.der_specs.append(spec)
+        self._spec_by_name[spec.name] = spec
         
         # Add as controllable load at baseline
         idx = pp.create_load(
@@ -447,13 +474,16 @@ class DERManager:
         logger.info(f"Added Demand Response: {name} at Bus {bus}, {baseline_load_mw} MW baseline, {capacity_mw:.2f} MW curtailable")
         return idx
         
-    def set_solar_output(self, name: str, irradiance_w_m2: float) -> None:
+    def set_solar_output(self, name: str, irradiance_w_m2: float,
+                         dt_s: float = 300.0) -> None:
         """
         Set the active power of a named solar PV DER based on irradiance and update the network element.
         
         Args:
             name: PV system name
             irradiance_w_m2: Solar irradiance (W/m²), typically 0-1000
+            dt_s: Time since last call in seconds (default 300s = 5 min control step)
+                  Used for ramp rate limiting (FIX NEW-BUG-04).
             
         Raises:
             ValueError: If DER not found or wrong type
@@ -488,16 +518,28 @@ class DERManager:
                 raise RuntimeError(f"DER '{name}' index {idx} no longer valid in network")
                 
             self.net.sgen.at[idx, 'p_mw'] = output_mw
+            # FIX BUG-24 + NEW-BUG-04: Apply ramp rate limit using actual dt
+            if spec.ramp_rate_mw_per_min is not None:
+                last = self._last_outputs.get(name, output_mw)
+                dt_min = dt_s / 60.0  # seconds → minutes
+                max_change = spec.ramp_rate_mw_per_min * dt_min
+                clamped = np.clip(output_mw, last - max_change, last + max_change)
+                self.net.sgen.at[idx, 'p_mw'] = clamped
+                output_mw = clamped
+            self._last_outputs[name] = output_mw
             
             logger.debug(f"{name}: {irradiance_w_m2} W/m² → {output_mw:.2f} MW")
         
-    def set_wind_output(self, name: str, wind_speed_m_s: float) -> None:
+    def set_wind_output(self, name: str, wind_speed_m_s: float,
+                        dt_s: float = 300.0) -> None:
         """
         Set the wind turbine's active power output based on the provided wind speed.
         
         Args:
             name: Wind farm name
             wind_speed_m_s: Wind speed (m/s)
+            dt_s: Time since last call in seconds (default 300s = 5 min control step)
+                  Used for ramp rate limiting (FIX NEW-BUG-04).
             
         Raises:
             ValueError: If DER not found or wrong type
@@ -517,14 +559,21 @@ class DERManager:
                 logger.warning(f"Negative wind speed {wind_speed_m_s} for {name}, clamping to 0")
                 wind_speed_m_s = 0
                 
-            # Simplified power curve: cubic relationship between 3-15 m/s
-            if wind_speed_m_s < 3:
-                capacity_factor = 0
-            elif wind_speed_m_s > 15:
-                capacity_factor = 1.0
+            # IEC 61400 standard power curve: cut-in=3, rated=12, cut-out=25 m/s
+            # FIX IEEE-25: Add cut-out at 25 m/s
+            # FIX IEEE-26: Correct cubic formula (v³ - v_ci³) / (v_r³ - v_ci³)
+            v_ci = 3.0    # Cut-in speed
+            v_r = 12.0    # Rated speed
+            v_co = 25.0   # Cut-out speed
+            if wind_speed_m_s < v_ci:
+                capacity_factor = 0.0
+            elif wind_speed_m_s > v_co:
+                capacity_factor = 0.0  # Emergency shutdown above cut-out
+            elif wind_speed_m_s >= v_r:
+                capacity_factor = 1.0  # Rated power between v_r and v_co
             else:
-                # Cubic approximation: P ∝ v³
-                capacity_factor = min(((wind_speed_m_s - 3) / 12) ** 3, 1.0)
+                # IEC cubic: (v³ - v_ci³) / (v_r³ - v_ci³)
+                capacity_factor = (wind_speed_m_s**3 - v_ci**3) / (v_r**3 - v_ci**3)
                 
             output_mw = spec.capacity_mw * capacity_factor
             
@@ -535,6 +584,15 @@ class DERManager:
                 raise RuntimeError(f"DER '{name}' index {idx} no longer valid in network")
                 
             self.net.sgen.at[idx, 'p_mw'] = output_mw
+            # FIX BUG-24 + NEW-BUG-04: Apply ramp rate limit using actual dt
+            if spec.ramp_rate_mw_per_min is not None:
+                last = self._last_outputs.get(name, output_mw)
+                dt_min = dt_s / 60.0
+                max_change = spec.ramp_rate_mw_per_min * dt_min
+                clamped = np.clip(output_mw, last - max_change, last + max_change)
+                self.net.sgen.at[idx, 'p_mw'] = clamped
+                output_mw = clamped
+            self._last_outputs[name] = output_mw
             
             logger.debug(f"{name}: {wind_speed_m_s} m/s → {output_mw:.2f} MW ({capacity_factor*100:.1f}%)")
         
@@ -640,23 +698,24 @@ class DERManager:
         Notes:
             Updates the associated pandapower load: sets active power to baseline minus the curtailed amount and reactive power to 20% of the resulting active power.
         """
-        spec = self._get_spec(name)
-        if spec.der_type != DERType.DEMAND_RESPONSE:
-            raise ValueError(f"{name} is not a demand response program")
+        with self._lock:  # FIX TS01: Add thread safety
+            spec = self._get_spec(name)
+            if spec.der_type != DERType.DEMAND_RESPONSE:
+                raise ValueError(f"{name} is not a demand response program")
             
-        # Clamp to valid range
-        curtailment_fraction = np.clip(curtailment_fraction, 0, 1)
-        
-        # Calculate actual load: baseline - (curtailable × curtailment_fraction)
-        curtailment_mw = spec.capacity_mw * curtailment_fraction
-        actual_load_mw = spec.baseline_load_mw - curtailment_mw
-        
-        idx = self.der_indices[name]
-        self.net.load.at[idx, 'p_mw'] = actual_load_mw
-        self.net.load.at[idx, 'q_mvar'] = actual_load_mw * 0.2
-        
-        if curtailment_fraction > 0:
-            logger.info(f"{name}: DR activated, curtailing {curtailment_mw:.2f} MW ({curtailment_fraction*100:.1f}%)")
+            # Clamp to valid range
+            curtailment_fraction = np.clip(curtailment_fraction, 0, 1)
+            
+            # Calculate actual load: baseline - (curtailable × curtailment_fraction)
+            curtailment_mw = spec.capacity_mw * curtailment_fraction
+            actual_load_mw = spec.baseline_load_mw - curtailment_mw
+            
+            idx = self.der_indices[name]
+            self.net.load.at[idx, 'p_mw'] = actual_load_mw
+            self.net.load.at[idx, 'q_mvar'] = actual_load_mw * 0.2
+            
+            if curtailment_fraction > 0:
+                logger.info(f"{name}: DR activated, curtailing {curtailment_mw:.2f} MW ({curtailment_fraction*100:.1f}%)")
         
     def update_ev_charging_by_hour(self, hour: int) -> None:
         """
@@ -699,71 +758,75 @@ class DERManager:
                 - DEMAND_RESPONSE: includes `current_output_mw`, `curtailment_level`, and `curtailed_load_mw`.
                 - Solar/Wind (generation types): includes `current_output_mw` and `availability`.
         """
-        spec = self._get_spec(name)
-        idx = self.der_indices[name]
+        with self._lock:  # FIX BUG-14: Thread-safe reads
+            spec = self._get_spec(name)
+            idx = self.der_indices[name]
         
-        if spec.der_type == DERType.BESS:
-            storage = self.net.storage.loc[idx]
-            return DERState(
-                name=name,
-                der_type=spec.der_type,
-                bus=spec.bus,
-                current_output_mw=storage.p_mw,
-                capacity_mw=spec.capacity_mw,
-                availability=1.0,
-                soc=self.battery_soc.get(name, 0.5),
-                charging=storage.p_mw < 0
-            )
-        elif spec.der_type == DERType.EV_CHARGING:
-            load = self.net.load.loc[idx]
-            utilization = load.p_mw / spec.capacity_mw if spec.capacity_mw > 0 else 0
-            return DERState(
-                name=name,
-                der_type=spec.der_type,
-                bus=spec.bus,
-                current_output_mw=load.p_mw,  # Positive for load
-                capacity_mw=spec.capacity_mw,
-                availability=1.0,
-                utilization=utilization,
-                num_active_chargers=int(utilization * spec.num_chargers)
-            )
-        elif spec.der_type == DERType.DEMAND_RESPONSE:
-            load = self.net.load.loc[idx]
-            curtailed_mw = spec.baseline_load_mw - load.p_mw
-            curtailment_level = curtailed_mw / spec.capacity_mw if spec.capacity_mw > 0 else 0
-            return DERState(
-                name=name,
-                der_type=spec.der_type,
-                bus=spec.bus,
-                current_output_mw=load.p_mw,  # Positive for load
-                capacity_mw=spec.capacity_mw,
-                availability=1.0,
-                curtailment_level=curtailment_level,
-                curtailed_load_mw=curtailed_mw
-            )
-        else:
-            sgen = self.net.sgen.loc[idx]
-            return DERState(
-                name=name,
-                der_type=spec.der_type,
-                bus=spec.bus,
-                current_output_mw=sgen.p_mw,
-                capacity_mw=spec.capacity_mw,
-                availability=sgen.p_mw / spec.capacity_mw if spec.capacity_mw > 0 else 0
-            )
+            if spec.der_type == DERType.BESS:
+                storage = self.net.storage.loc[idx]
+                return DERState(
+                    name=name,
+                    der_type=spec.der_type,
+                    bus=spec.bus,
+                    current_output_mw=storage.p_mw,
+                    capacity_mw=spec.capacity_mw,
+                    availability=1.0,
+                    soc=self.battery_soc.get(name, 0.5),
+                    charging=storage.p_mw < 0
+                )
+            elif spec.der_type == DERType.EV_CHARGING:
+                load = self.net.load.loc[idx]
+                utilization = load.p_mw / spec.capacity_mw if spec.capacity_mw > 0 else 0
+                return DERState(
+                    name=name,
+                    der_type=spec.der_type,
+                    bus=spec.bus,
+                    current_output_mw=load.p_mw,
+                    capacity_mw=spec.capacity_mw,
+                    availability=1.0,
+                    utilization=utilization,
+                    num_active_chargers=int(utilization * spec.num_chargers)
+                )
+            elif spec.der_type == DERType.DEMAND_RESPONSE:
+                load = self.net.load.loc[idx]
+                curtailed_mw = spec.baseline_load_mw - load.p_mw
+                curtailment_level = curtailed_mw / spec.capacity_mw if spec.capacity_mw > 0 else 0
+                return DERState(
+                    name=name,
+                    der_type=spec.der_type,
+                    bus=spec.bus,
+                    current_output_mw=load.p_mw,
+                    capacity_mw=spec.capacity_mw,
+                    availability=1.0,
+                    curtailment_level=curtailment_level,
+                    curtailed_load_mw=curtailed_mw
+                )
+            else:
+                sgen = self.net.sgen.loc[idx]
+                return DERState(
+                    name=name,
+                    der_type=spec.der_type,
+                    bus=spec.bus,
+                    current_output_mw=sgen.p_mw,
+                    capacity_mw=spec.capacity_mw,
+                    availability=sgen.p_mw / spec.capacity_mw if spec.capacity_mw > 0 else 0
+                )
             
     def get_all_der_states(self) -> List[DERState]:
         """
         Retrieve the current state for every registered DER.
+        FIX BUG-14: Thread-safe via self._lock.
         
         Returns:
             states (List[DERState]): A list containing one DERState for each registered DER.
         """
-        return [self.get_der_state(name) for name in self.der_indices.keys()]
+        with self._lock:
+            return [self.get_der_state(name) for name in self.der_indices.keys()]
         
     def _get_spec(self, name: str) -> DERSpec:
         """
         Retrieve the DERSpec for a DER with the given name.
+        FIX BUG-13: O(1) dict-based lookup instead of O(n) linear scan.
         
         Parameters:
             name (str): Unique DER name to look up.
@@ -774,33 +837,50 @@ class DERManager:
         Raises:
             ValueError: If no DER with the given name is found.
         """
-        for spec in self.der_specs:
-            if spec.name == name:
-                return spec
+        spec = self._spec_by_name.get(name)
+        if spec is not None:
+            return spec
+        # Fallback: scan list and populate cache (handles legacy paths)
+        for s in self.der_specs:
+            if s.name == name:
+                self._spec_by_name[name] = s
+                return s
         raise ValueError(f"DER not found: {name}")
         
     def update_battery_soc(self, timestep_hours: float = 1.0) -> None:
         """
-        Advance battery states of charge (SOC) for all registered BESS units and synchronize them to the pandapower storage table.
+        Advance battery states of charge (SOC) for all registered BESS units
+        using enhanced BatteryState tracking with round-trip efficiency.
         
-        For each battery, reads the current power (positive = discharge, negative = charging), converts it to energy over the given timestep, updates the internal SOC map (clamped between 0 and 1), and writes the SOC back to the pandapower storage row as percent.
+        FIX U03: Uses BatteryState.update_soc() which applies round-trip efficiency.
+        FIX TS02: Thread-safe via internal lock.
         
         Parameters:
             timestep_hours (float): Duration over which power is integrated, in hours (default 1.0).
         """
-        for name, idx in self.der_indices.items():
-            spec = self._get_spec(name)
-            if spec.der_type == DERType.BESS:
-                power_mw = self.net.storage.at[idx, 'p_mw']
-                energy_mwh = power_mw * timestep_hours
-                
-                # Update SOC (positive power = discharge = decrease SOC)
-                delta_soc = -energy_mwh / spec.energy_capacity_mwh
-                new_soc = np.clip(self.battery_soc[name] + delta_soc, 0, 1)
-                self.battery_soc[name] = new_soc
-                
-                # Update pandapower storage SOC
-                self.net.storage.at[idx, 'soc_percent'] = new_soc * 100
+        with self._lock:  # FIX TS02: Add thread safety
+            for name, idx in self.der_indices.items():
+                spec = self._get_spec(name)
+                if spec.der_type == DERType.BESS:
+                    power_mw = self.net.storage.at[idx, 'p_mw']
+                    energy_mwh = power_mw * timestep_hours
+                    
+                    # FIX U03: Use BatteryState for efficiency-aware SOC update
+                    if name in self._battery_states:
+                        self._battery_states[name].update_soc(energy_mwh)
+                        new_soc = self._battery_states[name].soc
+                    else:
+                        # Fallback: apply default 92% efficiency
+                        eta = 0.92
+                        if energy_mwh < 0:  # Charging
+                            energy_mwh *= eta
+                        delta_soc = -energy_mwh / spec.energy_capacity_mwh
+                        new_soc = np.clip(self.battery_soc.get(name, 0.5) + delta_soc, 0, 1)
+                    
+                    self.battery_soc[name] = new_soc
+                    
+                    # Update pandapower storage SOC
+                    self.net.storage.at[idx, 'soc_percent'] = new_soc * 100
     
     def get_total_generation(self) -> float:
         """
@@ -898,6 +978,91 @@ class DERManager:
             status["battery"]["current_soc_pct"] /= status["battery"]["unit_count"]
             
         return status
+    
+    # ==================== BUG-09: LVRT/HVRT Ride-Through ==================== #
+    
+    def check_voltage_ride_through(
+        self, name: str, voltage_pu: float, duration_s: float
+    ) -> bool:
+        """
+        Check if a DER should remain connected during a voltage disturbance
+        per IEEE 1547-2018 Category III ride-through curves.
+        
+        FIX BUG-09: DERs no longer disconnect instantly on voltage sag/swell.
+        
+        Args:
+            name: DER name
+            voltage_pu: Bus voltage in per-unit
+            duration_s: Duration the voltage has been at this level (seconds)
+            
+        Returns:
+            True if DER should remain connected (ride-through), False if should trip
+        """
+        # IEEE 1547-2018 Category III voltage ride-through
+        # LVRT: must ride through to 0.0 pu for up to 1.0s
+        if voltage_pu < 0.50:
+            return duration_s < 1.0   # Must ride through 0-0.5 pu for up to 1.0s
+        elif voltage_pu < 0.70:
+            return duration_s < 2.0   # 0.5-0.7 pu for up to 2.0s
+        elif voltage_pu < 0.88:
+            return duration_s < 10.0  # 0.7-0.88 pu for up to 10.0s
+        # HVRT: must ride through up to 1.20 pu for 0.5s
+        elif voltage_pu > 1.20:
+            return duration_s < 0.16  # >1.20 pu for up to 0.16s
+        elif voltage_pu > 1.10:
+            return duration_s < 0.5   # 1.10-1.20 pu for up to 0.5s
+        # Normal voltage range - always connected
+        return True
+    
+    # ==================== BUG-25: Anti-Islanding Detection ==================== #
+    
+    def check_anti_islanding(
+        self, name: str, frequency_hz: float, voltage_pu: float,
+        rocof_hz_per_s: float = 0.0, dt: float = 0.02
+    ) -> bool:
+        """
+        Detect islanding condition for a DER using frequency/voltage/ROCOF.
+        Per IEEE 1547-2018, DERs must detect island and disconnect within 2 seconds.
+        
+        FIX BUG-25: Implements passive anti-islanding detection.
+        
+        Args:
+            name: DER name
+            frequency_hz: Measured frequency at DER bus
+            voltage_pu: Measured voltage at DER bus
+            rocof_hz_per_s: Rate of Change of Frequency (Hz/s)
+            dt: Time step (seconds)
+            
+        Returns:
+            True if islanding detected (DER should disconnect), False otherwise
+        """
+        islanding_detected = False
+        
+        # Check frequency-based detection
+        if abs(frequency_hz - 50.0) > 0.5:  # >0.5 Hz deviation
+            islanding_detected = True
+        
+        # Check voltage-based detection
+        if voltage_pu < 0.88 or voltage_pu > 1.10:
+            islanding_detected = True
+        
+        # Check ROCOF-based detection (>1.0 Hz/s suggests island)
+        if abs(rocof_hz_per_s) > 1.0:
+            islanding_detected = True
+        
+        # Timer-based confirmation (avoid nuisance trips)
+        timer = self._islanding_timers.get(name, 0.0)
+        if islanding_detected:
+            timer += dt
+            if timer >= 2.0:  # 2 second IEEE 1547 requirement
+                self._islanded_ders[name] = True
+                logger.warning(f"Anti-islanding: {name} detected island, disconnecting")
+        else:
+            timer = max(0.0, timer - dt)
+            self._islanded_ders[name] = False
+        self._islanding_timers[name] = timer
+        
+        return self._islanded_ders.get(name, False)
                 
     def __repr__(self) -> str:
         """

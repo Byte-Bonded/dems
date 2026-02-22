@@ -18,7 +18,9 @@ __author__ = "DEMS Team"
 from .core import EnergyManager, GridMonitor, StabilityStatus
 from .agent import RLAgent, DEMSEnvironment
 from .grid import DEMSGrid
-from .orchestrator import GridOrchestrator
+from .orchestrator import MonitoringOrchestrator
+# FIX BUG-18: backward compat alias
+GridOrchestrator = MonitoringOrchestrator
 
 __all__ = [
     # Version info

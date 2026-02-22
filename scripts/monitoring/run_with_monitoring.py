@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Run DEMS Simulation with Prometheus Monitoring
-Integrates GridOrchestrator with Prometheus metrics export
+Integrates MonitoringOrchestrator with Prometheus metrics export
 """
 
 import sys
@@ -12,8 +12,8 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.orchestrator import GridOrchestrator
-from scripts.monitoring.prometheus_exporter import DEMSPrometheusExporter
+from src.orchestrator import MonitoringOrchestrator
+from src.monitoring.prometheus_exporter import DEMSPrometheusExporter
 
 # Configure logging
 logging.basicConfig(
@@ -50,7 +50,7 @@ def run_monitored_simulation(
     
     # Initialize Grid Orchestrator
     logger.info("\nInitializing DEMS Grid Orchestrator...")
-    orchestrator = GridOrchestrator(log_level="INFO")
+    orchestrator = MonitoringOrchestrator(log_level="INFO")
     logger.info("✓ Grid orchestrator ready")
     
     try:
