@@ -17,8 +17,9 @@ from streamlit_app.components.topology_graph import build_topology_figure, AREA_
 from streamlit_app.components.time_series_charts import power_balance_chart, frequency_chart, voltage_profile_chart, tie_line_flow_chart
 from streamlit_app.components.status_indicators import stability_indicator, convergence_dot, sim_clock
 from streamlit_app.components.der_cards import der_summary_row
+from streamlit_app.components.sidebar import render_sidebar
 
-init_session()
+render_sidebar()
 
 st.markdown("## 🔌 SuperGrid Overview")
 st.markdown("*117-bus Tri-Area System — 3 × IEEE 39-bus (New England)*")

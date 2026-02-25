@@ -24,6 +24,7 @@ from .dynamics import (
     DynamicLoadModel,
     ProtectionRelay,
     IEEE39_GENERATOR_DATA,
+    LoadFrequencyController,
 )
 from .orchestrator import (
     GridOrchestrator,
@@ -74,6 +75,7 @@ __all__ = [
     "DynamicLoadModel",
     "ProtectionRelay",
     "IEEE39_GENERATOR_DATA",
+    "LoadFrequencyController",
     # Orchestrator (RL entry point)
     "GridOrchestrator",
     "ScenarioConfig",

@@ -15,8 +15,9 @@ import pandas as pd
 from streamlit_app.simulation.state_manager import init_session, get_current, get_history
 from streamlit_app.components.time_series_charts import frequency_chart
 from streamlit_app.components.metrics_cards import metric_card
+from streamlit_app.components.sidebar import render_sidebar
 
-init_session()
+render_sidebar()
 
 st.markdown("## 📊 Dynamics Monitor")
 st.markdown("*Generator swing dynamics, AGC, exciter/governor, protection relays*")

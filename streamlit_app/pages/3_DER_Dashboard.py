@@ -15,8 +15,9 @@ from streamlit_app.simulation.state_manager import init_session, get_current, ge
 from streamlit_app.components.der_cards import der_state_card, der_summary_row, DER_ICONS, DER_COLORS, DER_LABELS
 from streamlit_app.components.time_series_charts import der_output_chart, soc_gauge
 from streamlit_app.components.metrics_cards import metric_card
+from streamlit_app.components.sidebar import render_sidebar
 
-init_session()
+render_sidebar()
 
 st.markdown("## 🔋 DER Dashboard")
 st.markdown("*Distributed Energy Resources — 23 units across 3 areas*")

@@ -153,31 +153,13 @@ class PowerFlowRunner:
                 converged = True
                 iterations = 1
             else:
-                # AC power flow
-                pp.runpp(
-                    net,
-                    algorithm=algo.value,
-                    max_iteration=self.config.max_iterations,
-                    tolerance_mva=self.config.tolerance_mva,
-                    enforce_q_lims=self.config.enforce_q_limits,
-                    calculate_voltage_angles=self.config.calculate_voltage_angles,
-                    init=self.config.init_method,
-                    check_connectivity=self.config.check_connectivity,
-                    voltage_depend_loads=self.config.voltage_depend_loads,
-                )
-                converged = net.converged
-                # FIX P03: Robust iteration count extraction
-                iterations = 0
-                if hasattr(net, '_ppc') and net._ppc is not None:
-                    iterations = net._ppc.get('iterations', 0)
-                elif hasattr(net, 'res_bus') and not net.res_bus.empty:
-                    iterations = self.config.max_iterations  # Converged but count unavailable
+                # AC power flow with automatic fallback cascade
+                # FIX LIGHT-LOAD: At extreme load levels (e.g. 50%), the NR
+                # outer Q-limit enforcement loop can oscillate between PV/PQ
+                # bus modes and fail to converge.  The cascade tries
+                # progressively relaxed strategies to guarantee a solution.
+                converged, iterations = self._run_ac_with_fallback(net, algo)
                 
-        except pp.powerflow.LoadflowNotConverged as e:
-            converged = False
-            error_msg = f"Power flow did not converge: {str(e)}"
-            logger.warning(error_msg)
-            
         except Exception as e:
             converged = False
             error_msg = f"Power flow error: {str(e)}"
@@ -195,6 +177,113 @@ class PowerFlowRunner:
             
         self.last_result = result
         return result
+
+    # ---- internal: AC power flow with fallback cascade ----
+
+    def _run_ac_with_fallback(
+        self,
+        net: pp.pandapowerNet,
+        algo: PowerFlowAlgorithm,
+    ) -> tuple:
+        """
+        Execute AC power flow with an automatic fallback cascade.
+
+        The cascade tries progressively relaxed strategies to guarantee
+        convergence even under extreme loading (light-load / heavy-load):
+
+        1. Primary: configured algorithm, init method, and Q-limit enforcement.
+        2. DC-initialised: same algorithm with ``init='dc'`` for a better
+           starting point.
+        3. Q-relaxed: disable ``enforce_q_lims`` so the outer PV↔PQ switching
+           loop cannot oscillate.  The resulting generator reactive outputs may
+           exceed their steady-state ratings, but the voltage solution is
+           mathematically valid and usable by the simulation/RL agent.
+        4. Flat-start Q-relaxed: ``init='flat'`` as a last resort.
+
+        Returns:
+            (converged, iterations): bool convergence flag and iteration count.
+        """
+        cfg = self.config
+
+        # Strategy 1: primary settings
+        try:
+            pp.runpp(
+                net,
+                algorithm=algo.value,
+                max_iteration=cfg.max_iterations,
+                tolerance_mva=cfg.tolerance_mva,
+                enforce_q_lims=cfg.enforce_q_limits,
+                calculate_voltage_angles=cfg.calculate_voltage_angles,
+                init=cfg.init_method,
+                check_connectivity=cfg.check_connectivity,
+                voltage_depend_loads=cfg.voltage_depend_loads,
+            )
+            return net.converged, self._extract_iterations(net)
+        except pp.powerflow.LoadflowNotConverged:
+            logger.debug("PF cascade: primary attempt failed, trying DC init")
+
+        # Strategy 2: DC-initialised
+        try:
+            pp.runpp(
+                net,
+                algorithm=algo.value,
+                max_iteration=cfg.max_iterations * 2,
+                tolerance_mva=cfg.tolerance_mva,
+                enforce_q_lims=cfg.enforce_q_limits,
+                calculate_voltage_angles=cfg.calculate_voltage_angles,
+                init="dc",
+                check_connectivity=cfg.check_connectivity,
+                voltage_depend_loads=cfg.voltage_depend_loads,
+            )
+            return net.converged, self._extract_iterations(net)
+        except pp.powerflow.LoadflowNotConverged:
+            logger.debug("PF cascade: DC-init attempt failed, trying Q-relaxed")
+
+        # Strategy 3: Q-relaxed (no enforce_q_lims)
+        try:
+            pp.runpp(
+                net,
+                algorithm=algo.value,
+                max_iteration=cfg.max_iterations * 2,
+                tolerance_mva=cfg.tolerance_mva,
+                enforce_q_lims=False,
+                calculate_voltage_angles=cfg.calculate_voltage_angles,
+                init=cfg.init_method,
+                check_connectivity=cfg.check_connectivity,
+                voltage_depend_loads=cfg.voltage_depend_loads,
+            )
+            logger.info("PF cascade: converged with Q-limits relaxed")
+            return net.converged, self._extract_iterations(net)
+        except pp.powerflow.LoadflowNotConverged:
+            logger.debug("PF cascade: Q-relaxed failed, trying flat start")
+
+        # Strategy 4: flat-start Q-relaxed
+        try:
+            pp.runpp(
+                net,
+                algorithm=algo.value,
+                max_iteration=cfg.max_iterations * 3,
+                tolerance_mva=cfg.tolerance_mva,
+                enforce_q_lims=False,
+                calculate_voltage_angles=cfg.calculate_voltage_angles,
+                init="flat",
+                check_connectivity=cfg.check_connectivity,
+                voltage_depend_loads=cfg.voltage_depend_loads,
+            )
+            logger.info("PF cascade: converged with flat-start Q-relaxed")
+            return net.converged, self._extract_iterations(net)
+        except pp.powerflow.LoadflowNotConverged as e:
+            logger.warning(f"PF cascade: all strategies failed: {e}")
+            raise  # Re-raise so the outer handler catches it
+
+    @staticmethod
+    def _extract_iterations(net: pp.pandapowerNet) -> int:
+        """Extract NR iteration count from the solved network."""
+        if hasattr(net, '_ppc') and net._ppc is not None:
+            return net._ppc.get('iterations', 0)
+        if hasattr(net, 'res_bus') and not net.res_bus.empty:
+            return 0  # Converged but count unavailable
+        return 0
     
     def run_with_contingency(
         self,

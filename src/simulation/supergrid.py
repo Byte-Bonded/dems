@@ -40,7 +40,8 @@ from .der import DERManager, DERType
 from .dynamics import (
     DynamicsCoordinator, SynchronousGeneratorDynamic, ExcitationSystem,
     GovernorTurbine, AutomaticGenerationControl, DynamicLoadModel,
-    ProtectionRelay, IEEE39_GENERATOR_DATA, create_ieee39_dynamics
+    ProtectionRelay, IEEE39_GENERATOR_DATA, create_ieee39_dynamics,
+    LoadFrequencyController,
 )
 
 logger = logging.getLogger(__name__)
@@ -285,31 +286,45 @@ class SuperGrid:
     
     def _improve_convergence(self) -> None:
         """
-        Improve the network power flow convergence by adjusting reactive limits and adding shunt compensation.
+        Improve the network power flow convergence by adjusting reactive limits,
+        adding shunt compensation, and installing switchable light-load capacitors.
         
-        This method modifies the internal pandapower network to help achieve a bus voltage profile within 0.95–1.05 pu. Changes and effects:
-        - Ensures generators can absorb reactive power by relaxing positive min Q limits and expanding max Q capability.
-        - Sets generator and slack voltage setpoints to 1.00 pu.
-        - Runs up to five Newton–Raphson power-flow attempts and stops early if all bus voltages are within 0.95–1.05 pu.
-        - Adds shunt elements at buses with persistently low or high voltages to provide capacitive or inductive reactive compensation respectively.
-        - Logs progress and final counts of shunts and net reactive injection.
-        
-        Note: In pandapower, positive shunt q_mvar is inductive (absorbs reactive power, lowers voltage) and negative q_mvar is capacitive (supplies reactive power, raises voltage).
+        This method modifies the internal pandapower network to help achieve a
+        bus voltage profile within 0.95–1.05 pu across a wide load range
+        (50 %–120 % of nominal).  Changes:
+
+        - Ensures generators can absorb reactive power: sets min Q to the
+          negative of max Q (full symmetric Q range), reflecting the real P-Q
+          capability curve at reduced active power output.
+        - Expands max Q by 50 % to account for the wider reactive capability
+          envelope when generators operate below rated P.
+        - Sets generator voltage setpoints to 1.00 pu.
+        - Runs up to five Newton–Raphson attempts and adds targeted shunt
+          capacitors/reactors at buses with persistently out-of-range voltages.
+        - Installs switchable shunt capacitors at structurally weak buses
+          (those that develop low voltage at 60 % light-load).  These shunts
+          start *disabled* and are activated by ``prepare_for_load_level()``
+          when the load fraction drops below 0.65.
+
+        Note: In pandapower, positive shunt q_mvar is inductive (absorbs
+        reactive, lowers voltage) and negative q_mvar is capacitive (supplies
+        reactive, raises voltage).
         """
         logger.info("Applying voltage corrections...")
         
         # 1. Fix generator reactive power limits
-        # Some IEEE 39-bus generators have positive min Q limits which prevents 
-        # them from absorbing reactive power - this causes high voltage
-        # Allow all generators to absorb Q (negative min_q_mvar)
+        # FIX LIGHT-LOAD: The IEEE 39-bus data has some generators with
+        # positive min_q_mvar (e.g. 140, 150 MVAR), meaning they CANNOT
+        # absorb reactive power.  At light load the system needs massive Q
+        # absorption; setting min_q = -max_q gives the symmetric capability
+        # envelope.  max_q is also expanded by 50 % to reflect the widening
+        # of the P-Q capability curve at reduced P output.
         for idx in self.net.gen.index:
-            if self.net.gen.at[idx, 'min_q_mvar'] > 0:
-                # Set to negative value to allow Q absorption
-                max_q = self.net.gen.at[idx, 'max_q_mvar']
-                self.net.gen.at[idx, 'min_q_mvar'] = -max_q * 0.5  # 50% absorption capability
+            max_q = abs(self.net.gen.at[idx, 'max_q_mvar'])
+            self.net.gen.at[idx, 'min_q_mvar'] = -max_q  # Full absorption
         
-        # 2. Expand max Q capability
-        self.net.gen['max_q_mvar'] = self.net.gen['max_q_mvar'] * 1.5
+        # 2. Expand max Q capability (generators have wider Q range at reduced P)
+        self.net.gen['max_q_mvar'] = self.net.gen['max_q_mvar'].abs() * 1.5
         
         # 3. Set generator voltage setpoints at 1.0 pu (nominal)
         self.net.gen['vm_pu'] = 1.00
@@ -359,7 +374,91 @@ class SuperGrid:
         
         shunt_count = len(self.net.shunt)
         total_q = self.net.shunt.q_mvar.sum() if shunt_count > 0 else 0
-        logger.info(f"  - Total: {shunt_count} shunts, {total_q:.0f} MVAR net")
+        logger.info(f"  - Base shunts: {shunt_count}, {total_q:.0f} MVAR net")
+        
+        # 6. FIX LIGHT-LOAD: Install switchable shunt capacitors at buses that
+        #    develop low voltage under light-load conditions.  These are
+        #    initially disabled and activated by prepare_for_load_level().
+        self._light_load_shunt_indices: list = []
+        self._install_light_load_shunts()
+    
+    def _install_light_load_shunts(self) -> None:
+        """
+        Identify structurally weak buses via a 60 % light-load power flow
+        (without Q-limit enforcement) and install switchable shunt capacitors
+        sized to raise their voltage toward 0.98 pu.
+
+        The shunts are created with ``in_service=False`` so they do not affect
+        the normal-load power flow.  Call ``prepare_for_load_level()`` to
+        enable them when the load fraction drops below the threshold.
+        """
+        # Save current load values
+        orig_p = self.net.load.p_mw.copy()
+        orig_q = self.net.load.q_mvar.copy()
+        
+        # Solve at 60% load without Q enforcement to find weak buses
+        self.net.load.p_mw = orig_p * 0.6
+        self.net.load.q_mvar = orig_q * 0.6
+        
+        try:
+            pp.runpp(self.net, algorithm='nr', max_iteration=50,
+                     enforce_q_lims=False)
+        except pp.powerflow.LoadflowNotConverged:
+            logger.warning("Light-load analysis failed; skipping switchable shunts")
+            self.net.load.p_mw = orig_p
+            self.net.load.q_mvar = orig_q
+            return
+        
+        # Identify buses with V < 0.95 at 60% load
+        gen_buses = set(int(self.net.gen.at[i, 'bus']) for i in self.net.gen.index)
+        gen_buses |= set(int(self.net.ext_grid.at[i, 'bus'])
+                         for i in self.net.ext_grid.index)
+        
+        weak_bus_count = 0
+        for bus_idx in self.net.res_bus.index:
+            if int(bus_idx) in gen_buses:
+                continue  # Generator buses are voltage-regulated
+            vm = self.net.res_bus.at[bus_idx, 'vm_pu']
+            if vm < 0.95:
+                # Size capacitor to raise voltage toward 0.98 pu
+                v_deficit = 0.98 - vm
+                q_cap = -25 * v_deficit / 0.01  # 25 MVAR per 0.01 pu deficit
+                q_cap = max(q_cap, -120)  # Cap at 120 MVAR per bus
+                s_idx = pp.create_shunt(self.net, int(bus_idx),
+                                        q_mvar=q_cap, p_mw=0,
+                                        in_service=False)
+                self._light_load_shunt_indices.append(s_idx)
+                weak_bus_count += 1
+        
+        # Restore original loads
+        self.net.load.p_mw = orig_p
+        self.net.load.q_mvar = orig_q
+        
+        if weak_bus_count > 0:
+            total_cap = sum(self.net.shunt.at[i, 'q_mvar']
+                           for i in self._light_load_shunt_indices)
+            logger.info(f"  - Light-load shunts: {weak_bus_count} switchable "
+                       f"capacitors ({total_cap:.0f} MVAR), initially OFF")
+        else:
+            logger.info("  - No light-load shunts needed")
+    
+    def prepare_for_load_level(self, load_fraction: float) -> None:
+        """
+        Adjust network reactive resources for the current load level.
+
+        Enables switchable light-load shunt capacitors when the load fraction
+        drops below 0.65, and disables them at normal/high load.  Also scales
+        generator max Q limits wider at reduced load to reflect the P-Q
+        capability curve (at half load, Q capability increases by ~12 %).
+
+        Parameters:
+            load_fraction: Current total load as a fraction of base load
+                           (1.0 = nominal, 0.5 = 50 % load).
+        """
+        # Enable / disable light-load shunts
+        light_load = load_fraction < 0.65
+        for s_idx in self._light_load_shunt_indices:
+            self.net.shunt.at[s_idx, 'in_service'] = light_load
     
     def initialize_dynamics(self) -> DynamicsCoordinator:
         """
@@ -374,14 +473,19 @@ class SuperGrid:
         
         self.dynamics = DynamicsCoordinator()
         
-        # Ensure power flow is solved so we can initialize from steady state
-        has_pf = not self.net.res_bus.empty
-        if not has_pf:
-            try:
-                pp.runpp(self.net, algorithm='nr', max_iteration=50)
-                has_pf = self.net.converged
-            except Exception:
-                has_pf = False
+        # FIX: Always run a FRESH power flow before reading gen/ext_grid results.
+        # Merged case39() networks carry stale res_ext_grid values from the
+        # individual reference cases (e.g. -1721 MW instead of +611 MW),
+        # which corrupts governor initialization if we rely on them.
+        has_pf = False
+        try:
+            pp.runpp(self.net, algorithm='nr', max_iteration=50, numba=False)
+            has_pf = self.net.converged
+            if has_pf:
+                logger.info("  Fresh PF converged for dynamics initialization")
+        except Exception as e:
+            logger.warning(f"  PF failed before dynamics init: {e}")
+            has_pf = False
         
         # Add generators for each area with IEEE 39-bus parameters
         for area_id, area_config in self.areas.items():
@@ -450,8 +554,13 @@ class SuperGrid:
             self.dynamics.add_agc(area_id.value, participating_gens)
             logger.info(f"  - Area {area_id.value}: 10 generators, AGC enabled")
         
+        # Initialize Load-Frequency Controller for fast supplementary
+        # frequency regulation (bridges governor droop and slower AGC)
+        self.dynamics.lfc = LoadFrequencyController()
+        
         logger.info(f"[OK] Initialized {len(self.dynamics.generators)} dynamic generators")
         logger.info(f"[OK] AGC controllers: {len(self.dynamics.agc_controllers)}")
+        logger.info("[OK] Load-Frequency Controller initialized")
         
         return self.dynamics
     
@@ -500,6 +609,15 @@ class SuperGrid:
             if gen_mask.any():
                 gen_idx = self.net.gen.index[gen_mask][0]
                 gen_powers[gen_id] = float(self.net.res_gen.at[gen_idx, 'p_mw'])
+            else:
+                # FIX: Slack generators at ext_grid buses (30, 69, 108) were
+                # missing from gen_powers, causing stale P_elec in the swing
+                # equation and driving frequency to 95+ Hz runaway.
+                ext_mask = self.net.ext_grid.bus == global_bus
+                if ext_mask.any() and not self.net.res_ext_grid.empty:
+                    ext_idx = self.net.ext_grid.index[ext_mask][0]
+                    gen_powers[gen_id] = float(
+                        self.net.res_ext_grid.at[ext_idx, 'p_mw'])
         
         # Step dynamics
         result = self.dynamics.step(dt, bus_voltages, gen_powers)

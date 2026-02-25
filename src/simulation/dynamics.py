@@ -81,7 +81,7 @@ class GovernorParams:
     R: float = 0.05
     TG: float = 0.2
     TT: float = 0.5
-    Pmax: float = 1.2
+    Pmax: float = 1.5   # Raised from 1.2 — slack gens can operate at 1.35 pu
     Pmin: float = 0.0
     Pref: float = 1.0
     valve_rate_up: float = 0.1    # pu/s (IEEE-06 fix)
@@ -182,6 +182,8 @@ class SynchronousGeneratorDynamic:
         ) * dt
         # FIX BUG-04: Symplectic Euler — update omega FIRST, then use NEW omega for delta
         self.omega += d_omega
+        # Safety clamp: prevent numerical runaway (45-55 Hz hard limits)
+        self.omega = np.clip(self.omega, 0.90, 1.10)
         d_delta = self.omega_base * (self.omega - 1.0) * dt
         self.delta += d_delta
         # FIX NEW-BUG-05: Field flux dynamics dEq'/dt = (Efd - Eq') / Td0'
@@ -293,12 +295,14 @@ class GovernorTurbine:
         self.Pg = 1.0
         self.Pm = 1.0
         self.Pref = self.params.Pref
+        self.base_Pref = self.params.Pref  # ED setpoint (modified by AGC only)
 
     def initialize_from_pf(self, Pm0_pu: float):
         """Initialize from PF steady state (FIX IEEE-08)."""
         self.Pg = Pm0_pu
         self.Pm = Pm0_pu
         self.Pref = Pm0_pu
+        self.base_Pref = Pm0_pu  # Store ED setpoint for AGC/LFC layering
 
     def update(self, dt: float, omega: float, Pref: Optional[float] = None) -> float:
         """Advance TGOV1 with trapezoidal + rate limiting."""
@@ -556,6 +560,78 @@ class ProtectionRelay:
         self.ofgt_tripped = False
 
 
+# ======================== LOAD-FREQUENCY CONTROLLER ======================== #
+
+class LoadFrequencyController:
+    """Fast supplementary Load-Frequency Controller (LFC).
+
+    Provides real-time generation adjustment to maintain system frequency at
+    nominal 50 Hz.  Sits between the fast governor droop (primary, 0-30 s)
+    and the slower AGC (secondary, 30 s - 15 min), closing the gap for
+    disturbances that exceed primary response capability.
+
+    Uses a PI controller with anti-windup on frequency deviation to compute
+    a system-wide MW correction distributed across generators by MVA share.
+
+    Parameters
+    ----------
+    Kp : float
+        Proportional gain in MW / Hz.  Default 200 suits a ~6 GW system.
+    Ki : float
+        Integral gain in MW / (Hz * s).  Drives steady-state error to zero.
+    deadband_hz : float
+        Frequency deviation below which the controller does not act (IEGC).
+    output_limit_mw : float
+        Maximum absolute correction in MW (anti-windup).
+    nominal_frequency_hz : float
+        System nominal frequency (50 Hz for Indian Grid Code).
+    """
+
+    def __init__(
+        self,
+        Kp: float = 200.0,
+        Ki: float = 20.0,
+        deadband_hz: float = 0.015,
+        output_limit_mw: float = 1000.0,
+        nominal_frequency_hz: float = 50.0,
+    ):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.deadband_hz = deadband_hz
+        self.output_limit_mw = output_limit_mw
+        self.nominal_frequency_hz = nominal_frequency_hz
+        self.integral: float = 0.0
+        self.output_mw: float = 0.0
+
+    def update(self, dt: float, frequency_hz: float) -> float:
+        """Compute total generation adjustment in MW.
+
+        Positive -> increase generation (frequency too low).
+        Negative -> decrease generation (frequency too high).
+        """
+        delta_f = frequency_hz - self.nominal_frequency_hz
+
+        if abs(delta_f) < self.deadband_hz:
+            # Inside deadband: decay integral slowly to avoid wind-up
+            self.integral *= max(0.0, 1.0 - 0.1 * dt)
+        else:
+            self.integral += delta_f * dt
+            # Anti-windup clamp
+            max_int = self.output_limit_mw / max(self.Ki, 1e-6)
+            self.integral = np.clip(self.integral, -max_int, max_int)
+
+        self.output_mw = -(self.Kp * delta_f + self.Ki * self.integral)
+        self.output_mw = np.clip(
+            self.output_mw, -self.output_limit_mw, self.output_limit_mw
+        )
+        return self.output_mw
+
+    def reset(self) -> None:
+        """Reset controller state (call on episode reset)."""
+        self.integral = 0.0
+        self.output_mw = 0.0
+
+
 # ======================== SYSTEM COORDINATOR ======================== #
 
 class DynamicsCoordinator:
@@ -571,6 +647,11 @@ class DynamicsCoordinator:
         self.protection: Dict[str, ProtectionRelay] = {}
         self.system_frequency_hz = 50.0
         self.time_seconds = 0.0
+        # AGC runs at realistic 4-second intervals (not every 20ms substep)
+        self._agc_interval_s: float = 4.0
+        self._agc_timer: float = 0.0
+        # Load-Frequency Controller for fast supplementary frequency regulation
+        self.lfc: Optional[LoadFrequencyController] = None
 
     def add_generator(self, gen_id: str, bus: int,
                       params: Optional[GeneratorDynamicParams] = None,
@@ -637,17 +718,41 @@ class DynamicsCoordinator:
                     f * h for f, h in zip(frequencies, inertias)) / total_inertia
             else:
                 self.system_frequency_hz = np.mean(frequencies)
-        # 6. AGC + APPLY adjustments (FIX C01)
+        # 6. AGC at realistic 4-second intervals (not every 20ms substep)
+        #    Old code ran AGC every substep with gov.Pref += ... * dt,
+        #    causing massive over-correction and frequency instability.
+        self._agc_timer += dt
         agc_adjustments = {}
-        for area_id, agc in self.agc_controllers.items():
-            adjustments = agc.update(dt, self.system_frequency_hz)
-            agc_adjustments[area_id] = adjustments
-            for gen_id, delta_p_mw in adjustments.items():
-                if gen_id in self.governors:
-                    gov = self.governors[gen_id]
+        if self._agc_timer >= self._agc_interval_s:
+            elapsed = self._agc_timer
+            self._agc_timer = 0.0
+            for area_id, agc in self.agc_controllers.items():
+                adjustments = agc.update(elapsed, self.system_frequency_hz)
+                agc_adjustments[area_id] = adjustments
+                for gen_id, delta_p_mw in adjustments.items():
+                    if gen_id in self.governors:
+                        gov = self.governors[gen_id]
+                        gen = self.generators[gen_id]
+                        delta_p_pu = delta_p_mw / gen.params.MVA_base
+                        # Apply as direct correction to base setpoint
+                        gov.base_Pref = np.clip(
+                            gov.base_Pref + delta_p_pu,
+                            gov.params.Pmin, gov.params.Pmax)
+        # 6b. LFC — fast supplementary frequency control (every substep)
+        if self.lfc is not None:
+            lfc_mw = self.lfc.update(dt, self.system_frequency_hz)
+            total_mva = sum(g.params.MVA_base
+                           for g in self.generators.values())
+            if total_mva > 0:
+                for gen_id, gov in self.governors.items():
                     gen = self.generators[gen_id]
-                    delta_p_pu = delta_p_mw / gen.params.MVA_base
-                    gov.Pref += delta_p_pu * dt
+                    share = gen.params.MVA_base / total_mva
+                    lfc_pu = (lfc_mw * share) / gen.params.MVA_base
+                    gov.Pref = np.clip(gov.base_Pref + lfc_pu,
+                                       gov.params.Pmin, gov.params.Pmax)
+        else:
+            for gen_id, gov in self.governors.items():
+                gov.Pref = gov.base_Pref
         # 7. Loads
         load_updates = {}
         for bus, load in self.loads.items():
@@ -694,7 +799,7 @@ class DynamicsCoordinator:
 # Keys = pandapower 0-indexed bus numbers (FIX IEEE-15: was 30-39, now 29-38)
 # pandapower case39(): buses 0-38, gens at [29,31-38], ext_grid at [30]
 IEEE39_GENERATOR_DATA = {
-    29: {"H": 500.0, "MVA": 250, "type": "Hydro", "D": 0.1},
+    29: {"H": 500.0, "MVA": 250, "type": "Hydro", "D": 2.0},  # D raised from 0.1 for stability
     30: {"H": 30.3, "MVA": 520, "type": "Slack", "D": 2.0},
     31: {"H": 35.8, "MVA": 650, "type": "Steam", "D": 2.0},
     32: {"H": 28.6, "MVA": 632, "type": "Steam", "D": 2.0},

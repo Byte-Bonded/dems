@@ -13,8 +13,9 @@ import plotly.graph_objects as go
 import numpy as np
 
 from streamlit_app.simulation.state_manager import init_session
+from streamlit_app.components.sidebar import render_sidebar
 
-init_session()
+render_sidebar()
 
 st.markdown("## 🏘️ Microgrid View")
 st.markdown("*Standalone 5-bus system — PyPower-compatible Newton-Raphson solver*")
@@ -59,7 +60,7 @@ if "mg_pf_result" not in st.session_state:
 
 if run_pf_btn:
     # Update DER outputs for current time step
-    for d in ders:
+    for d in ders.values():
         try:
             p, q = d.get_output(time_step)
         except:
@@ -161,8 +162,9 @@ if pf:
 
 # ── DER outputs ──────────────────────────────────────────────────────────
 st.markdown("#### DER Component Outputs")
-der_cols = st.columns(len(ders))
-for i, d in enumerate(ders):
+der_list = list(ders.values())  # ders is Dict[str, DERComponent]
+der_cols = st.columns(len(der_list))
+for i, d in enumerate(der_list):
     with der_cols[i]:
         try:
             p, q = d.get_output(time_step)
@@ -190,7 +192,7 @@ if run_sim_btn:
 
     progress = st.progress(0)
     for h in range(24):
-        for d in ders:
+        for d in ders.values():
             try:
                 d.get_output(h)
             except:
@@ -205,7 +207,7 @@ if run_sim_btn:
                 v_profiles[bus_id].append(abs(result["V"][bus_id]))
 
         # Collect DER outputs
-        for d in ders:
+        for d in ders.values():
             try:
                 p, _ = d.get_output(h)
             except:

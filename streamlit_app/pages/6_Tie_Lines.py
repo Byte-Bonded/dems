@@ -16,8 +16,9 @@ from streamlit_app.simulation.state_manager import init_session, get_current, ge
 from streamlit_app.components.time_series_charts import tie_line_flow_chart
 from streamlit_app.components.metrics_cards import metric_card
 from streamlit_app.components.topology_graph import AREA_COLORS
+from streamlit_app.components.sidebar import render_sidebar
 
-init_session()
+render_sidebar()
 
 st.markdown("## 🔗 Tie Lines & Inter-Area Transfers")
 st.markdown("*8 tie-lines connecting Areas A, B, C in mesh topology for N-1 security*")

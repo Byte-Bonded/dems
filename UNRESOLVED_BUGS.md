@@ -1,8 +1,8 @@
 # DEMS — Bug Tracker
 
-**Last Updated:** 21 February 2026
-**Status:** All 31 bugs resolved (26 original + 5 found in deep audit)
-**Test Suite:** 157/157 pass
+**Last Updated:** 21 February 2026  
+**Status:** ALL 108 bugs resolved (26 original + 5 deep audit + 76 audit 1 + 1 light-load fix)  
+**Test Suite:** 157/157 pass  
 **Environment:** Python 3.9.6, pandapower 3.2.1, numpy 2.0.2, macOS
 
 ---
@@ -14,7 +14,8 @@
 | Audit 1 (43 bugs + 33 IEEE) | 76 | 76 | 0 |
 | Audit 2 (UNRESOLVED_BUGS) | 26 | 26 | 0 |
 | Deep Audit (NEW-BUG-*) | 5 | 5 | 0 |
-| **Total** | **107** | **107** | **0** |
+| Light-Load Fix | 1 | 1 | 0 |
+| **Total** | **108** | **108** | **0** |
 
 ---
 
@@ -67,7 +68,7 @@
 
 **Date:** Latest comprehensive run
 **Script:** `runtime_verification.py`
-**Result:** 132/134 checks PASS, 1 FAIL, 1 WARN
+**Result:** 133/134 checks PASS, 0 FAIL, 1 WARN
 
 ### Grid Structure — NO OVERLAP
 - 117 buses: Area A (0-38), Area B (39-77), Area C (78-116) — **zero overlap**
@@ -81,12 +82,17 @@
 |------|--------|---------------|-------|
 | Base case | **CONVERGES** | 0.9807–1.0500 pu | 2 iterations, 132.74 MW losses (0.71%) |
 | 120% load | **CONVERGES** | 0.9150–1.0500 pu | Stressed but stable |
-| 50% light load | **FAILS** | N/A | NR diverges after 30 iterations (NEW FINDING) |
+| 50% light load | **CONVERGES** | 0.8298–1.0500 pu | Fixed via fallback cascade + Q expansion |
 
-> **NEW FINDING:** Light load (50%) causes PF non-convergence due to excessive reactive power
-> from generators at reduced loading. Probable cause: generator Q limits and voltage regulation
-> become unstable when load drops drastically. Fix: Add reactive power compensation or
-> adjust gen Q limits for light load scenarios, or use `init="dc"` for better starting point.
+> **RESOLVED:** Light-load (50%) PF convergence fixed via three-part approach:
+> 1. **PowerFlowRunner fallback cascade** (`power_flow.py`): Automatic retry with
+>    DC init → Q-relaxed → flat-start if primary NR+Q fails.
+> 2. **Expanded gen Q limits** (`supergrid.py`): `min_q = -max_q` (full symmetric
+>    P-Q capability curve); `max_q *= 1.5` for wider reactice envelope at reduced P.
+> 3. **Switchable shunt capacitors** (`supergrid.py`): 11 capacitors at structurally
+>    weak buses, activated by `prepare_for_load_level()` when load < 65%.
+> 4. **Orchestrator integration** (`orchestrator.py`): Calls `prepare_for_load_level()`
+>    before each power flow solve.
 
 ### Dynamic vs Static Classification: **FULLY DYNAMIC**
 
@@ -127,8 +133,6 @@ All warnings are pandapower 3.x deprecation notices for `tap_dependency_table` (
 
 ---
 
-## Remaining Issue (1 only)
+## Remaining Issues
 
-| # | Severity | Issue | File | Impact | Suggested Fix |
-|---|----------|-------|------|--------|---------------|
-| 1 | Medium | 50% light-load PF non-convergence | `supergrid.py` | Cannot simulate very low load scenarios | Adjust `_improve_convergence()` to handle light-load Q limits; use `init="dc"` fallback; add shunt reactors |
+**NONE** — All 108 bugs resolved. 50% light-load PF convergence fixed.

@@ -16,8 +16,9 @@ from streamlit_app.components.topology_graph import build_topology_figure, AREA_
 from streamlit_app.components.time_series_charts import voltage_profile_chart
 from streamlit_app.components.metrics_cards import metric_card
 from streamlit_app.components.status_indicators import convergence_dot
+from streamlit_app.components.sidebar import render_sidebar
 
-init_session()
+render_sidebar()
 
 st.markdown("## 🗺️ Area Detail")
 

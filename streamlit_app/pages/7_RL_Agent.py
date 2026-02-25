@@ -14,8 +14,9 @@ import numpy as np
 
 from streamlit_app.simulation.state_manager import init_session, get_current
 from streamlit_app.components.metrics_cards import metric_card
+from streamlit_app.components.sidebar import render_sidebar
 
-init_session()
+render_sidebar()
 
 st.markdown("## 🤖 RL Agent")
 st.markdown("*Reinforcement Learning-based grid optimization (PPO / SAC)*")

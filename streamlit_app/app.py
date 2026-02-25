@@ -80,74 +80,12 @@ button[data-baseweb="tab"][aria-selected="true"] {
 
 # ── Initialise session state ──────────────────────────────────────────────
 from streamlit_app.simulation.state_manager import init_session, get_engine, step_simulation, get_current, get_history
+from streamlit_app.components.sidebar import render_sidebar
 
 init_session()
 
-# ── Sidebar controls (persistent across pages) ───────────────────────────
-with st.sidebar:
-    st.markdown("## ⚡ DEMS Grid")
-    st.markdown('<div class="sidebar-section">Simulation</div>', unsafe_allow_html=True)
-
-    # Play / Pause / Step
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("▶ Play", use_container_width=True, type="primary" if not st.session_state["running"] else "secondary"):
-            st.session_state["running"] = True
-    with col2:
-        if st.button("⏸ Pause", use_container_width=True):
-            st.session_state["running"] = False
-    with col3:
-        if st.button("⏭ Step", use_container_width=True):
-            st.session_state["running"] = False
-            step_simulation()
-
-    st.session_state["sim_speed_hours"] = st.slider(
-        "Step size (hours)", 0.25, 4.0, 1.0, 0.25,
-        help="Simulated hours per step"
-    )
-    st.session_state["refresh_rate_s"] = st.slider(
-        "Refresh rate (s)", 1, 10, 2,
-        help="Seconds between auto-steps when running"
-    )
-
-    st.markdown('<div class="sidebar-section">Weather Override</div>', unsafe_allow_html=True)
-    weather_mode = st.radio("Weather", ["Auto (24h profile)", "Manual"], horizontal=True, label_visibility="collapsed")
-    if weather_mode == "Manual":
-        irr_override = st.slider("Irradiance (W/m²)", 0, 1200, 600, 50)
-        ws_override = st.slider("Wind Speed (m/s)", 0.0, 30.0, 8.0, 0.5)
-    else:
-        irr_override = None
-        ws_override = None
-
-    st.markdown('<div class="sidebar-section">Grid Events</div>', unsafe_allow_html=True)
-    event = st.selectbox("Inject event", ["None", "Load spike Area A (+20%)", "Load drop Area B (-15%)", "Load spike Area C (+25%)"], label_visibility="collapsed")
-
-    st.markdown("---")
-    st.markdown('<div class="sidebar-section">Mode</div>', unsafe_allow_html=True)
-    st.session_state["sim_mode"] = st.radio("Simulation mode", ["embedded", "api"], horizontal=True, label_visibility="collapsed")
-    if st.session_state["sim_mode"] == "api":
-        st.session_state["api_url"] = st.text_input("API URL", st.session_state["api_url"])
-
-# ── Auto-step logic ──────────────────────────────────────────────────────
-if st.session_state["running"]:
-    engine = get_engine()
-    # Apply weather overrides before stepping
-    if irr_override is not None:
-        engine.set_irradiance(irr_override)
-    if ws_override is not None:
-        engine.set_wind_speed(ws_override)
-    # Apply grid events
-    if event and event != "None":
-        if "Area A" in event and "+20%" in event:
-            engine.scale_area_load("A", 1.20)
-        elif "Area B" in event and "-15%" in event:
-            engine.scale_area_load("B", 0.85)
-        elif "Area C" in event and "+25%" in event:
-            engine.scale_area_load("C", 1.25)
-    step_simulation()
-    import time
-    time.sleep(0.1)  # small sleep before rerun
-    st.rerun()
+# ── Shared sidebar controls ──────────────────────────────────────────────
+render_sidebar()
 
 # ── Page router (Streamlit >= 1.30 native multi-page) ────────────────────
 # The pages are auto-discovered from streamlit_app/pages/

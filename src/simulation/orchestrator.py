@@ -699,6 +699,10 @@ class GridOrchestrator:
         # Apply initial conditions from profiles (step 0)
         self._apply_profile_conditions(step=0)
 
+        # FIX LIGHT-LOAD: Prepare reactive resources for initial load level
+        initial_scale = self.profiles.load_scale_factor(0)
+        self.sg.prepare_for_load_level(initial_scale)
+
         # Solve initial power flow
         self._solve_power_flow()
 
@@ -773,36 +777,40 @@ class GridOrchestrator:
             for area_id in AreaID:
                 self.sg.scale_loads(area_id, scale)
 
-        # 3. Solve AC power flow
+        # 3. FIX LIGHT-LOAD: Adjust reactive resources for current load level
+        #    Enables/disables switchable shunt capacitors based on load fraction
+        self.sg.prepare_for_load_level(scale)
+
+        # 4. Solve AC power flow
         pf_result = self._solve_power_flow()
 
-        # 4. Step dynamics (multiple sub-steps for accuracy)
+        # 5. Step dynamics (multiple sub-steps for accuracy)
         dyn_result = None
         if pf_result.converged:
             for _ in range(self.cfg.dynamics_substeps):
                 dyn_result = self.sg.step_dynamics(dt=self.cfg.dt_dynamics_s)
 
-        # 5. Update battery SOC
+        # 6. Update battery SOC
         if self.der_manager:
             hours = self.cfg.dt_control_s / 3600.0
             self.der_manager.update_battery_soc(timestep_hours=hours)
 
-        # 6. Count protection trips
+        # 7. Count protection trips
         trips = 0
         if dyn_result and "protection" in dyn_result:
             trips = sum(1 for s in dyn_result["protection"].values() if s.get("tripped"))
 
-        # 7. Reward
+        # 8. Reward
         reward, reward_breakdown = self.reward_calc.compute(
             pf_result, self.system_frequency_hz, trips, action
         )
         self._last_reward = reward
         self._cumulative_reward += reward
 
-        # 8. Observation BEFORE restoration (FIX BUG-02: avoid stale loads)
+        # 9. Observation BEFORE restoration (FIX BUG-02: avoid stale loads)
         obs = self._build_observation()
 
-        # 9. Restore loads to BASE values (FIX C03: exact restore)
+        # 10. Restore loads to BASE values (FIX C03: exact restore)
         #    FIX NEW-BUG-01: Only restore non-DER loads; DER loads stay.
         if self._base_load_p is not None:
             for load_idx in self.sg.net.load.index:
@@ -815,7 +823,7 @@ class GridOrchestrator:
             for area_id in AreaID:
                 self.sg.scale_loads(area_id, 1.0 / max(scale, 1e-6))
 
-        # 10. Done?
+        # 11. Done?
         self._done = step >= self.cfg.episode_length_steps
 
         # Info

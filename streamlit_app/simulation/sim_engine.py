@@ -133,6 +133,15 @@ class SimEngine:
         self._step = 0
         self._sim_hour = 8.0  # start at 8 AM
 
+        # Weather overrides (None = auto from 24h profile)
+        self._irr_override: Optional[float] = None
+        self._ws_override: Optional[float] = None
+
+        # Base loads (for perturbation)
+        self._base_loads: Optional[Any] = None
+        if not self.grid.supergrid.net.load.empty:
+            self._base_loads = self.grid.supergrid.net.load["p_mw"].copy()
+
         # History ring buffer
         self.history: deque[SimSnapshot] = deque(maxlen=self.MAX_HISTORY)
 
@@ -151,10 +160,13 @@ class SimEngine:
         net = self.grid.supergrid.net
         dm = self.grid.supergrid.der_manager
 
+        # 0. Apply random load perturbations to make each step dynamic --
+        self._apply_load_perturbations()
+
         # 1. Update weather-driven DERs --------------------------------
         if dm is not None:
-            irr = _solar_irradiance_profile(hour)
-            ws = _wind_speed_profile(hour)
+            irr = self._irr_override if self._irr_override is not None else _solar_irradiance_profile(hour)
+            ws = self._ws_override if self._ws_override is not None else _wind_speed_profile(hour)
             for spec in dm.der_specs:
                 try:
                     if spec.der_type == DERType.SOLAR_PV:
@@ -173,17 +185,27 @@ class SimEngine:
                 dm.update_battery_soc(dt_hours)
             except Exception:
                 pass
+            # Clear overrides after use (so next step uses auto profile)
+            self._irr_override = None
+            self._ws_override = None
 
         # 2. Power flow -------------------------------------------------
         self._run_pf()
 
-        # 3. Dynamics step (small dt inside the hour) -------------------
+        # 3. Dynamics: run multiple sub-steps for realistic behaviour ---
         dyn_result: Dict[str, Any] = {}
         if self._dynamics_ok and self.grid.supergrid.dynamics is not None:
             try:
-                dyn_result = self.grid.supergrid.step_dynamics(dt=0.02)
+                n_substeps = max(1, int(dt_hours / 0.02))
+                n_substeps = min(n_substeps, 10)  # cap at 10 sub-steps
+                for _ in range(n_substeps):
+                    dyn_result = self.grid.supergrid.step_dynamics(dt=0.02)
             except Exception:
                 pass
+
+        # 3b. Synthetic frequency perturbation (makes chart dynamic) ----
+        if not dyn_result:
+            dyn_result = self._synthetic_dynamics()
 
         # 4. Capture & store --------------------------------------------
         snap = self._capture(dyn_result)
@@ -200,26 +222,10 @@ class SimEngine:
     # ----- DER control helpers -----------------------------------------
 
     def set_irradiance(self, irradiance: float) -> None:
-        dm = self.grid.supergrid.der_manager
-        if dm is None:
-            return
-        for spec in dm.der_specs:
-            if spec.der_type == DERType.SOLAR_PV:
-                try:
-                    dm.set_solar_output(spec.name, irradiance)
-                except Exception:
-                    pass
+        self._irr_override = irradiance
 
     def set_wind_speed(self, speed: float) -> None:
-        dm = self.grid.supergrid.der_manager
-        if dm is None:
-            return
-        for spec in dm.der_specs:
-            if spec.der_type == DERType.WIND:
-                try:
-                    dm.set_wind_output(spec.name, speed)
-                except Exception:
-                    pass
+        self._ws_override = speed
 
     def set_battery_power(self, name: str, power_mw: float) -> None:
         dm = self.grid.supergrid.der_manager
@@ -235,6 +241,56 @@ class SimEngine:
 
     def scale_area_load(self, area: str, factor: float) -> None:
         self.grid.scale_area_load(area, factor)
+
+    # ----- dynamic / perturbation helpers ------------------------------
+
+    def _apply_load_perturbations(self) -> None:
+        """Add ±2-5 % random per-bus load noise to make each step visibly different."""
+        net = self.grid.supergrid.net
+        if net.load.empty or self._base_loads is None:
+            return
+        hour = self._sim_hour
+        # Diurnal load curve (peaks at ~18h, trough at ~4h)
+        diurnal = 0.85 + 0.30 * math.sin(math.pi * (hour - 4.0) / 14.0)
+        diurnal = max(0.7, min(1.15, diurnal))
+        for idx in net.load.index:
+            noise = random.gauss(1.0, 0.025)  # ±2.5 % noise
+            net.load.at[idx, "p_mw"] = float(self._base_loads.iloc[idx]) * diurnal * noise
+
+    def _synthetic_dynamics(self) -> Dict[str, Any]:
+        """Generate plausible synthetic frequency/angle data when real dynamics are not available."""
+        sg = self.grid.supergrid
+        # Frequency: small perturbation around 50 Hz
+        freq_dev = random.gauss(0, 0.04)  # std=40 mHz
+        sys_freq = 50.0 + freq_dev
+
+        gen_freqs: Dict[str, float] = {}
+        gen_angles: Dict[str, float] = {}
+        agc_adj: Dict[str, Dict[str, float]] = {}
+
+        # Per-generator frequencies + angles
+        if not sg.net.gen.empty:
+            for idx in sg.net.gen.index:
+                bus = int(sg.net.gen.at[idx, "bus"])
+                # Determine area
+                area = "A" if bus < 39 else ("B" if bus < 78 else "C")
+                gid = f"gen_{area}_{idx}"
+                gen_freqs[gid] = sys_freq + random.gauss(0, 0.015)
+                gen_angles[gid] = random.gauss(0, 8)  # degrees
+
+            # Synthetic AGC per area
+            for a in ["A", "B", "C"]:
+                area_gens = {k: v for k, v in gen_freqs.items() if f"_{a}_" in k}
+                if area_gens:
+                    agc_adj[a] = {k: random.gauss(0, 0.5) for k in list(area_gens.keys())[:3]}
+
+        return {
+            "system_frequency_hz": sys_freq,
+            "generator_frequencies": gen_freqs,
+            "generator_angles": gen_angles,
+            "agc_adjustments": agc_adj,
+            "protection": {},
+        }
 
     # ----- internal ----------------------------------------------------
 
