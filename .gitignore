@@ -47,13 +47,12 @@ secrets/
 data/
 results/
 
-# Temporary test files
+# Temporary / debug scripts
 compare_*.py
 detailed_comparison.py
 minimal_test.py
-*_assessment.md
-BRUTAL_*.md
-GRID_CODE_REVIEW.md
+reproduce_*.py
+verify_*.py
 
 # React/Node
 website/node_modules/
@@ -62,10 +61,3 @@ website/out/
 website/build/
 website/.env.local
 website/.env.*.local
-
-# Monitoring
-prometheus/data/
-grafana/data/
-
-# Docker
-.dockerignore

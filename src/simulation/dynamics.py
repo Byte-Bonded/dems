@@ -96,6 +96,12 @@ class AGCParams:
     K_agc: float = 0.5
     T_agc: float = 4.0
     deadband_hz: float = 0.03   # IEGC standard (IEEE-22 fix, was 0.02)
+    # Dynamic output limit: prevents AGC from issuing unrealistically large
+    # setpoint corrections in a single 4-second interval (NERC BAL-001).
+    output_limit_mw: float = 400.0
+    # Maximum Pref step per generator per AGC interval (pu on machine MVA).
+    # Keeps individual unit setpoint changes within ramp capability.
+    max_gen_step_pu: float = 0.05  # ~5 % of rated per 4 s interval
 
 
 @dataclass
@@ -172,6 +178,12 @@ class SynchronousGeneratorDynamic:
         FIX NEW-BUG-05: When Efd is provided (from exciter), update Eq'
         via the field-circuit equation dEq'/dt = (Efd - Eq') / Td0'.
         This couples the AVR/PSS output back into the generator model."""
+        # NaN guard: if P_elec_mw is NaN (e.g. from non-converged PF),
+        # hold previous value to prevent NaN propagation through swing eqn.
+        if np.isnan(P_elec_mw):
+            P_elec_mw = self.P_elec  # keep last known good value
+        if np.isnan(Vt):
+            Vt = self.Vt
         self.Vt = Vt
         self.P_elec = P_elec_mw
         P_mech_pu = self.P_mech / self.params.MVA_base
@@ -413,6 +425,12 @@ class AutomaticGenerationControl:
         self.integral_ace = np.clip(self.integral_ace, -1000, 1000)
         i_term = -self.integral_ace / self.params.T_agc
         self.agc_output = p_term + i_term
+        # Dynamic output clamp: prevent unrealistically large corrections
+        self.agc_output = np.clip(
+            self.agc_output,
+            -self.params.output_limit_mw,
+             self.params.output_limit_mw,
+        )
         adjustments = {}
         for gen_id in self.participating_gens:
             pf = self.participation_factors.get(gen_id, 0.0)
@@ -594,14 +612,20 @@ class LoadFrequencyController:
         deadband_hz: float = 0.015,
         output_limit_mw: float = 1000.0,
         nominal_frequency_hz: float = 50.0,
+        ramp_rate_mw_per_s: float = 150.0,
     ):
         self.Kp = Kp
         self.Ki = Ki
         self.deadband_hz = deadband_hz
         self.output_limit_mw = output_limit_mw
         self.nominal_frequency_hz = nominal_frequency_hz
+        # Ramp rate limit: maximum MW/s the LFC output is allowed to change.
+        # Prevents step-change setpoint commands that outpace governor valve
+        # rate limiters and cause inter-area oscillations.
+        self.ramp_rate_mw_per_s = ramp_rate_mw_per_s
         self.integral: float = 0.0
         self.output_mw: float = 0.0
+        self._prev_output_mw: float = 0.0  # for ramp-rate enforcement
 
     def update(self, dt: float, frequency_hz: float) -> float:
         """Compute total generation adjustment in MW.
@@ -620,16 +644,21 @@ class LoadFrequencyController:
             max_int = self.output_limit_mw / max(self.Ki, 1e-6)
             self.integral = np.clip(self.integral, -max_int, max_int)
 
-        self.output_mw = -(self.Kp * delta_f + self.Ki * self.integral)
-        self.output_mw = np.clip(
-            self.output_mw, -self.output_limit_mw, self.output_limit_mw
-        )
+        raw_mw = -(self.Kp * delta_f + self.Ki * self.integral)
+        raw_mw = np.clip(raw_mw, -self.output_limit_mw, self.output_limit_mw)
+        # Ramp-rate limit: restrict how fast the output may change per step
+        max_step = self.ramp_rate_mw_per_s * dt
+        delta_out = raw_mw - self._prev_output_mw
+        delta_out = np.clip(delta_out, -max_step, max_step)
+        self.output_mw = self._prev_output_mw + delta_out
+        self._prev_output_mw = self.output_mw
         return self.output_mw
 
     def reset(self) -> None:
         """Reset controller state (call on episode reset)."""
         self.integral = 0.0
         self.output_mw = 0.0
+        self._prev_output_mw = 0.0
 
 
 # ======================== SYSTEM COORDINATOR ======================== #
@@ -651,7 +680,12 @@ class DynamicsCoordinator:
         self._agc_interval_s: float = 4.0
         self._agc_timer: float = 0.0
         # Load-Frequency Controller for fast supplementary frequency regulation
+        # (system-wide fallback; per-area LFCs in lfc_controllers take priority)
         self.lfc: Optional[LoadFrequencyController] = None
+        # Per-area LFC controllers (decentralized, one per area)
+        self.lfc_controllers: Dict[str, LoadFrequencyController] = {}
+        # Maps area_id -> list of gen_ids in that area (for per-area LFC dispatch)
+        self.area_generators: Dict[str, List[str]] = {}
 
     def add_generator(self, gen_id: str, bus: int,
                       params: Optional[GeneratorDynamicParams] = None,
@@ -674,11 +708,24 @@ class DynamicsCoordinator:
     def add_load(self, bus: int, P0_mw: float, Q0_mvar: float):
         self.loads[bus] = DynamicLoadModel(bus, P0_mw, Q0_mvar)
 
-    def add_agc(self, area_id: str, participating_gens: List[Tuple[str, float]]):
-        agc = AutomaticGenerationControl(area_id)
+    def add_agc(self, area_id: str, participating_gens: List[Tuple[str, float]],
+                params: Optional[AGCParams] = None):
+        agc = AutomaticGenerationControl(area_id, params)
         for gen_id, pf in participating_gens:
             agc.add_participating_generator(gen_id, pf)
         self.agc_controllers[area_id] = agc
+
+    def add_area_lfc(self, area_id: str, lfc: 'LoadFrequencyController',
+                     gen_ids: List[str]) -> None:
+        """Register a per-area LFC and the generator IDs it controls.
+
+        When any per-area LFC is registered the system-wide ``self.lfc`` is
+        bypassed.  Each area's LFC measures that area's Centre-of-Inertia
+        frequency and dispatches corrections only to generators within the
+        area, keeping disturbances localised and response fast.
+        """
+        self.lfc_controllers[area_id] = lfc
+        self.area_generators[area_id] = list(gen_ids)
 
     def step(self, dt: float, bus_voltages: Dict[int, float],
              gen_powers: Dict[str, float]) -> Dict:
@@ -708,16 +755,40 @@ class DynamicsCoordinator:
             efd = self.exciters[gen_id].Efd if gen_id in self.exciters else None
             freq, angle = gen.update(dt, Vt, P_elec, Efd=efd)
             frequencies.append(freq)
-        # 5. System frequency (CoI)
+        # 5. System frequency (CoI) + per-area Centre-of-Inertia frequencies
         if frequencies:
+            # NaN guard: filter out any NaN frequencies before CoI calculation
             inertias = [self.generators[g].params.H * self.generators[g].params.MVA_base
                        for g in self.generators]
             total_inertia = sum(inertias)
             if total_inertia > 0:
-                self.system_frequency_hz = sum(
+                coi_freq = sum(
                     f * h for f, h in zip(frequencies, inertias)) / total_inertia
             else:
-                self.system_frequency_hz = np.mean(frequencies)
+                coi_freq = np.mean(frequencies)
+            # If CoI result is NaN (from corrupt inputs), hold previous value
+            if not np.isnan(coi_freq):
+                self.system_frequency_hz = coi_freq
+            else:
+                logger.warning("CoI frequency is NaN — holding previous %.4f Hz",
+                               self.system_frequency_hz)
+        # Per-area CoI: each area's frequency measured from its own generators
+        _area_frequencies: Dict[str, float] = {}
+        for area_id, gen_ids in self.area_generators.items():
+            h_sum, fh_sum = 0.0, 0.0
+            for gid in gen_ids:
+                if gid in self.generators:
+                    g = self.generators[gid]
+                    h_mva = g.params.H * g.params.MVA_base
+                    h_sum += h_mva
+                    fh_sum += g.get_frequency_hz() * h_mva
+            _area_frequencies[area_id] = (
+                fh_sum / h_sum if h_sum > 0 else self.system_frequency_hz
+            )
+        # Areas known to AGC but without explicit gen registration use system CoI
+        for area_id in self.agc_controllers:
+            if area_id not in _area_frequencies:
+                _area_frequencies[area_id] = self.system_frequency_hz
         # 6. AGC at realistic 4-second intervals (not every 20ms substep)
         #    Old code ran AGC every substep with gov.Pref += ... * dt,
         #    causing massive over-correction and frequency instability.
@@ -727,19 +798,67 @@ class DynamicsCoordinator:
             elapsed = self._agc_timer
             self._agc_timer = 0.0
             for area_id, agc in self.agc_controllers.items():
-                adjustments = agc.update(elapsed, self.system_frequency_hz)
+                # Use per-area CoI frequency for localised ACE calculation
+                f_area = _area_frequencies.get(area_id, self.system_frequency_hz)
+                adjustments = agc.update(elapsed, f_area)
                 agc_adjustments[area_id] = adjustments
+                # Per-area max step limit for this 4-second AGC interval
+                _agc_max_step = self.agc_controllers[area_id].params.max_gen_step_pu
                 for gen_id, delta_p_mw in adjustments.items():
                     if gen_id in self.governors:
                         gov = self.governors[gen_id]
                         gen = self.generators[gen_id]
                         delta_p_pu = delta_p_mw / gen.params.MVA_base
-                        # Apply as direct correction to base setpoint
+                        # Dynamic step cap: no single interval may move Pref
+                        # by more than max_gen_step_pu to prevent large transients
+                        delta_p_pu = np.clip(delta_p_pu, -_agc_max_step, _agc_max_step)
                         gov.base_Pref = np.clip(
                             gov.base_Pref + delta_p_pu,
                             gov.params.Pmin, gov.params.Pmax)
         # 6b. LFC — fast supplementary frequency control (every substep)
-        if self.lfc is not None:
+        # Per-area decentralised LFC takes priority over the legacy global LFC.
+        if self.lfc_controllers:
+            # Each area's LFC acts only on generators within that area so that
+            # a disturbance in one area is corrected locally without perturbing
+            # neighbouring areas — key for a highly stable multi-area grid.
+            for area_id, lfc in self.lfc_controllers.items():
+                f_area = _area_frequencies.get(area_id, self.system_frequency_hz)
+                lfc_mw = lfc.update(dt, f_area)
+                area_gen_ids = self.area_generators.get(area_id, [])
+                area_mva = sum(
+                    self.generators[gid].params.MVA_base
+                    for gid in area_gen_ids if gid in self.governors
+                )
+                if area_mva > 0:
+                    # Per-generator step cap: LFC Pref change per substep must
+                    # not exceed the governor valve ramp rate * dt so the valve
+                    # rate limiter is never the bottleneck (avoids lag wind-up).
+                    for gid in area_gen_ids:
+                        if gid in self.governors:
+                            gen = self.generators[gid]
+                            gov = self.governors[gid]
+                            share = gen.params.MVA_base / area_mva
+                            lfc_pu = (lfc_mw * share) / gen.params.MVA_base
+                            # Dynamic threshold: cap at governor valve rate * dt
+                            max_lfc_step = gov.params.valve_rate_up * dt
+                            lfc_pu = np.clip(lfc_pu, -max_lfc_step, max_lfc_step)
+                            gov.Pref = np.clip(
+                                gov.base_Pref + lfc_pu,
+                                gov.params.Pmin, gov.params.Pmax
+                            )
+                else:
+                    for gid in area_gen_ids:
+                        if gid in self.governors:
+                            self.governors[gid].Pref = self.governors[gid].base_Pref
+            # Generators not assigned to any area: hold their base setpoint
+            _all_area_gens = {
+                gid for ids in self.area_generators.values() for gid in ids
+            }
+            for gen_id, gov in self.governors.items():
+                if gen_id not in _all_area_gens:
+                    gov.Pref = gov.base_Pref
+        elif self.lfc is not None:
+            # Fallback: legacy global system-wide LFC
             lfc_mw = self.lfc.update(dt, self.system_frequency_hz)
             total_mva = sum(g.params.MVA_base
                            for g in self.generators.values())

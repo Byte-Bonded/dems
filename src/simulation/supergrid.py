@@ -41,7 +41,7 @@ from .dynamics import (
     DynamicsCoordinator, SynchronousGeneratorDynamic, ExcitationSystem,
     GovernorTurbine, AutomaticGenerationControl, DynamicLoadModel,
     ProtectionRelay, IEEE39_GENERATOR_DATA, create_ieee39_dynamics,
-    LoadFrequencyController,
+    LoadFrequencyController, AGCParams,
 )
 
 logger = logging.getLogger(__name__)
@@ -550,17 +550,47 @@ class SuperGrid:
                     pf = data["MVA"] / 5000  # Participation proportional to size
                     participating_gens.append((gen_id, pf))
             
-            # Create AGC for area
-            self.dynamics.add_agc(area_id.value, participating_gens)
-            logger.info(f"  - Area {area_id.value}: 10 generators, AGC enabled")
+            # Create per-area AGC with parameters tuned for high stability
+            # Higher beta -> faster frequency bias response
+            # Lower K_agc -> less overshoot / oscillation
+            # Longer T_agc -> smoother integral to prevent hunting
+            # Tighter deadband -> better regulation around 50 Hz
+            area_agc_params = AGCParams(
+                beta=1200.0,
+                K_agc=0.3,
+                T_agc=6.0,
+                deadband_hz=0.02,
+            )
+            self.dynamics.add_agc(area_id.value, participating_gens, area_agc_params)
+            logger.info(f"  - Area {area_id.value}: 10 generators, AGC enabled (tuned)")
         
-        # Initialize Load-Frequency Controller for fast supplementary
-        # frequency regulation (bridges governor droop and slower AGC)
-        self.dynamics.lfc = LoadFrequencyController()
-        
+        # Create one per-area LFC: each area's controller measures its own
+        # Centre-of-Inertia frequency and corrects only its own generators.
+        # This keeps disturbances localised and gives faster, more stable
+        # frequency recovery than a single system-wide controller.
+        for area_id, area_config in self.areas.items():
+            area_str = area_id.value
+            # Generator IDs for this area (must match IDs registered above)
+            area_gen_ids = [
+                f"Gen_{area_str}_{local_bus}"
+                for local_bus in IEEE39_GENERATOR_DATA
+            ]
+            area_lfc = LoadFrequencyController(
+                Kp=300.0,              # Higher proportional gain → faster response
+                Ki=40.0,               # Stronger integral → eliminates steady-state error
+                deadband_hz=0.01,      # Tight deadband (±0.01 Hz) for precise regulation
+                output_limit_mw=500.0, # Per-area cap (3×500 = 1500 MW system-wide)
+                nominal_frequency_hz=50.0,
+            )
+            self.dynamics.add_area_lfc(area_str, area_lfc, area_gen_ids)
+            logger.info(f"  - Area {area_str}: per-area LFC created (Kp=300, Ki=40)")
+
+        # Disable the legacy single system-wide LFC; per-area LFCs take over
+        self.dynamics.lfc = None
+
         logger.info(f"[OK] Initialized {len(self.dynamics.generators)} dynamic generators")
-        logger.info(f"[OK] AGC controllers: {len(self.dynamics.agc_controllers)}")
-        logger.info("[OK] Load-Frequency Controller initialized")
+        logger.info(f"[OK] AGC controllers: {len(self.dynamics.agc_controllers)} (one per area, tuned)")
+        logger.info(f"[OK] LFC controllers: {len(self.dynamics.lfc_controllers)} (one per area, decentralized)")
         
         return self.dynamics
     
@@ -587,8 +617,11 @@ class SuperGrid:
             raise RuntimeError("Power flow not solved. Run power flow first.")
         
         # Get bus voltages from power flow results
-        bus_voltages = {int(bus): float(self.net.res_bus.at[bus, 'vm_pu']) 
-                       for bus in self.net.res_bus.index}
+        # NaN guard: use 1.0 pu fallback if PF produced NaN voltages
+        bus_voltages = {}
+        for bus in self.net.res_bus.index:
+            v = float(self.net.res_bus.at[bus, 'vm_pu'])
+            bus_voltages[int(bus)] = v if not np.isnan(v) else 1.0
         
         # Get generator powers from power flow results
         gen_powers = {}
@@ -608,7 +641,10 @@ class SuperGrid:
             gen_mask = self.net.gen.bus == global_bus
             if gen_mask.any():
                 gen_idx = self.net.gen.index[gen_mask][0]
-                gen_powers[gen_id] = float(self.net.res_gen.at[gen_idx, 'p_mw'])
+                val = float(self.net.res_gen.at[gen_idx, 'p_mw'])
+                # NaN guard: skip if PF produced NaN (non-convergence)
+                if not np.isnan(val):
+                    gen_powers[gen_id] = val
             else:
                 # FIX: Slack generators at ext_grid buses (30, 69, 108) were
                 # missing from gen_powers, causing stale P_elec in the swing
@@ -616,8 +652,10 @@ class SuperGrid:
                 ext_mask = self.net.ext_grid.bus == global_bus
                 if ext_mask.any() and not self.net.res_ext_grid.empty:
                     ext_idx = self.net.ext_grid.index[ext_mask][0]
-                    gen_powers[gen_id] = float(
-                        self.net.res_ext_grid.at[ext_idx, 'p_mw'])
+                    val = float(self.net.res_ext_grid.at[ext_idx, 'p_mw'])
+                    # NaN guard: skip if PF produced NaN
+                    if not np.isnan(val):
+                        gen_powers[gen_id] = val
         
         # Step dynamics
         result = self.dynamics.step(dt, bus_voltages, gen_powers)
@@ -635,6 +673,78 @@ class SuperGrid:
             current_frequency_hz (float): Current system frequency in hertz.
         """
         return self.system_frequency_hz
+    
+    def sync_dynamics_to_pf(self) -> None:
+        """Re-synchronize dynamics state to the current power-flow solution.
+        
+        Call this after the network operating point has changed significantly
+        (e.g. hourly load profile change, DER dispatch change) so that
+        governors, LFC integrators, and generator omega start from the new
+        steady-state rather than carrying stale transient state.
+        
+        This is essential when the simulation advances in large time leaps
+        (SimEngine hourly steps) but runs only a short burst of dynamics
+        per step.
+        """
+        if self.dynamics is None or self.net.res_bus.empty:
+            return
+        
+        for gen_id, gen in self.dynamics.generators.items():
+            parts = gen_id.split('_')
+            area, local_bus = parts[1], int(parts[2])
+            
+            for area_id, area_config in self.areas.items():
+                if area_id.value == area:
+                    global_bus = area_config.bus_offset + local_bus
+                    break
+            
+            # Read current P_elec from PF results
+            P_mw = None
+            gen_mask = self.net.gen.bus == global_bus
+            if gen_mask.any():
+                gen_idx = self.net.gen.index[gen_mask][0]
+                P_mw = float(self.net.res_gen.at[gen_idx, 'p_mw'])
+            else:
+                ext_mask = self.net.ext_grid.bus == global_bus
+                if ext_mask.any() and not self.net.res_ext_grid.empty:
+                    ext_idx = self.net.ext_grid.index[ext_mask][0]
+                    P_mw = float(self.net.res_ext_grid.at[ext_idx, 'p_mw'])
+            
+            # NaN guard: float(NaN) passes 'is not None' but must be
+            # rejected to avoid poisoning generator/governor state.
+            if P_mw is not None and not np.isnan(P_mw):
+                Pm_pu = P_mw / gen.params.MVA_base
+                # Reset generator to steady-state
+                gen.P_elec = P_mw
+                gen.P_mech = P_mw
+                gen.omega = 1.0
+                # Reset governor to match new operating point
+                if gen_id in self.dynamics.governors:
+                    gov = self.dynamics.governors[gen_id]
+                    gov.Pg = Pm_pu
+                    gov.Pm = Pm_pu
+                    gov.Pref = Pm_pu
+                    gov.base_Pref = Pm_pu
+        
+        # Reset LFC integrators (no accumulated error from prior hour)
+        for lfc in self.dynamics.lfc_controllers.values():
+            lfc.integral = 0.0
+            lfc.output_mw = 0.0
+            lfc._prev_output_mw = 0.0
+        if self.dynamics.lfc is not None:
+            self.dynamics.lfc.integral = 0.0
+            self.dynamics.lfc.output_mw = 0.0
+            self.dynamics.lfc._prev_output_mw = 0.0
+        
+        # Reset AGC ACE accumulation
+        for agc in self.dynamics.agc_controllers.values():
+            agc.ace = 0.0
+            agc.integral_ace = 0.0
+        self.dynamics._agc_timer = 0.0
+        
+        # Reset system frequency to nominal
+        self.system_frequency_hz = 50.0
+        self.dynamics.system_frequency_hz = 50.0
     
     def initialize_der(self, add_default: bool = True) -> DERManager:
         """

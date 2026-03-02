@@ -196,6 +196,10 @@ class SimEngine:
         dyn_result: Dict[str, Any] = {}
         if self._dynamics_ok and self.grid.supergrid.dynamics is not None:
             try:
+                # Re-sync governor/LFC state to the new PF operating point.
+                # Each step jumps ~1 hour ahead; without re-sync the governor
+                # and LFC carry stale transient state → frequency runaway.
+                self.grid.supergrid.sync_dynamics_to_pf()
                 n_substeps = max(1, int(dt_hours / 0.02))
                 n_substeps = min(n_substeps, 10)  # cap at 10 sub-steps
                 for _ in range(n_substeps):
@@ -400,6 +404,10 @@ class SimEngine:
         snap.system_frequency_hz = sg.system_frequency_hz
         if dyn_result:
             snap.system_frequency_hz = dyn_result.get("system_frequency_hz", 50.0)
+        # NaN guard: never expose NaN to the UI
+        import math
+        if math.isnan(snap.system_frequency_hz):
+            snap.system_frequency_hz = 50.0
             snap.generator_frequencies = dyn_result.get("generator_frequencies", {})
             snap.generator_angles = dyn_result.get("generator_angles", {})
             snap.agc_adjustments = dyn_result.get("agc_adjustments", {})
