@@ -1,0 +1,102 @@
+# Prometheus Configuration for DEMS
+# Dynamic Energy Management System Monitoring
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'dems-monitor'
+    environment: 'development'
+
+# Alertmanager configuration (optional)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+          # - alertmanager:9093
+
+# Rule files
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Scrape configurations
+scrape_configs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Prometheus self-monitoring
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          instance: 'prometheus'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Node Exporter - Host system metrics
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          instance: 'dems-host'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DEMS Application Metrics
+  # Main metrics endpoint from the DEMS FastAPI application
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: 'dems-api'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+        labels:
+          service: 'dems-api'
+          component: 'backend'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'dems-api'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DEMS Grid Simulator Metrics
+  # Metrics from the SuperGrid/Orchestrator
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: 'dems-simulator'
+    metrics_path: '/metrics'
+    scrape_interval: 5s  # More frequent for simulation data
+    static_configs:
+      - targets: ['host.docker.internal:8001']
+        labels:
+          service: 'dems-simulator'
+          component: 'simulation'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'dems-simulator'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DEMS RL Agent Metrics
+  # Training metrics from the PPO/SAC agent
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: 'dems-agent'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['host.docker.internal:8002']
+        labels:
+          service: 'dems-agent'
+          component: 'rl_agent'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'dems-agent'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Custom metrics exporter (if running standalone)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - job_name: 'dems-exporter'
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['host.docker.internal:9091']
+        labels:
+          service: 'dems-exporter'
+          component: 'metrics'

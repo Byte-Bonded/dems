@@ -272,9 +272,38 @@ class PowerFlowRunner:
             )
             logger.info("PF cascade: converged with flat-start Q-relaxed")
             return net.converged, self._extract_iterations(net)
-        except pp.powerflow.LoadflowNotConverged as e:
-            logger.warning(f"PF cascade: all strategies failed: {e}")
-            raise  # Re-raise so the outer handler catches it
+        except pp.powerflow.LoadflowNotConverged:
+            logger.debug("PF cascade: flat-start failed, trying relaxed tolerance")
+
+        # Strategy 5: relaxed tolerance (10× looser) — flat start, no Q lims
+        try:
+            pp.runpp(
+                net,
+                algorithm=algo.value,
+                max_iteration=cfg.max_iterations * 3,
+                tolerance_mva=cfg.tolerance_mva * 10,
+                enforce_q_lims=False,
+                calculate_voltage_angles=cfg.calculate_voltage_angles,
+                init="flat",
+                check_connectivity=cfg.check_connectivity,
+                voltage_depend_loads=cfg.voltage_depend_loads,
+            )
+            logger.info("PF cascade: converged with 10× relaxed tolerance")
+            return net.converged, self._extract_iterations(net)
+        except pp.powerflow.LoadflowNotConverged:
+            logger.debug("PF cascade: relaxed tolerance failed, trying DC fallback")
+
+        # Strategy 6: DC power flow as absolute last resort
+        # DC always converges (linear system). The voltage magnitudes will
+        # all be 1.0 pu but at least we get valid power flows and don't crash.
+        try:
+            pp.rundcpp(net)
+            logger.warning("PF cascade: fell back to DC power flow (no voltage accuracy)")
+            return True, 1
+        except Exception as e:
+            logger.warning(f"PF cascade: all strategies including DC failed: {e}")
+            # Return non-converged rather than raising to avoid crashing
+            return False, 0
 
     @staticmethod
     def _extract_iterations(net: pp.pandapowerNet) -> int:

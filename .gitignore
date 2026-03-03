@@ -36,6 +36,12 @@ env/
 *.swo
 *~
 .DS_Store
+._*
+
+# Model backups
+logs/rl/backup_*/
+logs/rl/checkpoint_*.zip
+logs/rl/dems_ppo_*.zip
 
 # Project specific
 *.log

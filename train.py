@@ -65,7 +65,7 @@ def main():
         logger.info(f"PyTorch {torch.__version__} | Device: {device}")
         if device == "cuda":
             gpu_name = torch.cuda.get_device_name(0)
-            gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024**3)
             logger.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GB VRAM)")
             logger.info(f"CUDA {torch.version.cuda} | cuDNN {torch.backends.cudnn.version()}")
             logger.info(f"VRAM cap: {args.vram_limit:.1f} GB / {gpu_mem:.1f} GB total")

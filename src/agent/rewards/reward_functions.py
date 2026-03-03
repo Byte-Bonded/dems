@@ -6,14 +6,14 @@ weighted sum so the total reward stays bounded.
 
 Microgrid Reward:
     - Voltage profile quality
-    - Economic generation cost (loss-based proxy)
+    - Economic generation cost (real cost curves from EconomicsEngine)
     - DER utilisation
     - Constraint violation penalty
 
 Central Reward:
     - Frequency regulation (primary objective)
     - Tie-line flow balance
-    - Global stability
+    - Global stability & economic efficiency
     - Protection trip penalty
 
 Sub-Agent Rewards:
@@ -34,6 +34,20 @@ from ..constraints.grid_constraints import (
     IEEE_V_MIN_PU,
     IEEE_V_MAX_PU,
 )
+
+# Lazy import of EconomicsEngine to avoid circular imports
+_economics_engine_cls = None
+
+def _get_economics_engine():
+    """Lazy import of EconomicsEngine."""
+    global _economics_engine_cls
+    if _economics_engine_cls is None:
+        try:
+            from src.simulation.economics import EconomicsEngine
+            _economics_engine_cls = EconomicsEngine
+        except ImportError:
+            _economics_engine_cls = None
+    return _economics_engine_cls
 
 
 @dataclass
@@ -63,15 +77,26 @@ class MicrogridReward:
 
     Objectives:
     1. Voltage profile quality (all buses in [0.95, 1.05] pu)
-    2. Economic operation (minimise losses)
+    2. Economic operation (real generation cost from EconomicsEngine, with
+       loss-based fallback when no engine is available)
     3. DER utilisation (maximise renewable fraction)
     4. Constraint violation penalty
     5. Action smoothness
     """
 
-    def __init__(self, weights: Optional[RewardWeights] = None):
+    # Daily cost budget ($/day) used to normalise cost reward.
+    # Set to approximate total cost of merit-order dispatch for the 30-gen
+    # SuperGrid at expected load (~6 GW·h/day).
+    COST_BUDGET_USD_H: float = 25_000.0   # $/h — ~$600 k/day
+
+    def __init__(
+        self,
+        weights: Optional[RewardWeights] = None,
+        economics_engine=None,
+    ):
         self.w = weights or RewardWeights()
         self._prev_action: Optional[np.ndarray] = None
+        self.economics = economics_engine
 
     def reset(self) -> None:
         self._prev_action = None
@@ -96,12 +121,24 @@ class MicrogridReward:
         v_ok_max = max(0, 1.0 - abs(v_max - 1.0) / 0.05) if v_max <= IEEE_V_MAX_PU else -abs(v_max - IEEE_V_MAX_PU) / 0.1
         r_voltage = (v_ok_min + v_ok_max) / 2.0
 
-        # 2. Economic (loss minimisation proxy)
+        # 2. Economic (real cost if EconomicsEngine available, else loss proxy)
         gen_mw = area_state.get("total_generation_mw", 0)
         load_mw = area_state.get("total_load_mw", 0)
         loss_mw = max(gen_mw - load_mw, 0) if gen_mw > 0 else 0
         loss_frac = loss_mw / max(gen_mw, 1.0)
-        r_economy = 1.0 - min(loss_frac / 0.03, 1.0)  # 0% → 1.0, ≥3% → 0.0
+
+        if self.economics is not None:
+            # Use real quadratic cost curves and carbon pricing
+            try:
+                cost_usd_h = self.economics.total_operating_cost()
+                # Normalise: 0 cost → +1, budget → 0, > budget → negative
+                r_economy = 1.0 - min(cost_usd_h / self.COST_BUDGET_USD_H, 2.0)
+            except Exception:
+                # Fallback to loss-based proxy
+                r_economy = 1.0 - min(loss_frac / 0.03, 1.0)
+        else:
+            # Original loss-based proxy
+            r_economy = 1.0 - min(loss_frac / 0.03, 1.0)  # 0% → 1.0, ≥3% → 0.0
 
         # 3. DER utilisation (renewable fraction of total gen)
         solar_mw = der_status.get("solar", {}).get("current_output_mw", 0)
@@ -153,12 +190,17 @@ class CentralReward:
     1. Frequency regulation (IEGC 49.5–50.5 Hz)
     2. Tie-line flow balance (minimise unscheduled interchange)
     3. Global stability (no protection trips)
-    4. Action smoothness
+    4. System-wide economic efficiency (optional, via EconomicsEngine)
     """
 
-    def __init__(self, weights: Optional[RewardWeights] = None):
+    def __init__(
+        self,
+        weights: Optional[RewardWeights] = None,
+        economics_engine=None,
+    ):
         self.w = weights or RewardWeights()
         self._prev_action: Optional[np.ndarray] = None
+        self.economics = economics_engine
 
     def reset(self) -> None:
         self._prev_action = None
@@ -191,7 +233,17 @@ class CentralReward:
         # 3. Stability (protection trips)
         r_stability = 1.0 if protection_trips == 0 else max(-1.0, 1.0 - protection_trips * 0.5)
 
-        # 4. Action smoothness
+        # 4. Economic efficiency (optional, via EconomicsEngine)
+        r_economy = 0.5  # neutral default
+        if self.economics is not None:
+            try:
+                cost_usd_h = self.economics.total_operating_cost()
+                # Normalise similarly to MicrogridReward
+                r_economy = 1.0 - min(cost_usd_h / 25_000.0, 2.0)
+            except Exception:
+                r_economy = 0.5
+
+        # 5. Action smoothness
         if self._prev_action is not None and len(action) == len(self._prev_action):
             delta = float(np.mean(np.abs(action - self._prev_action)))
             r_smooth = 1.0 - min(delta / 0.3, 1.0)
@@ -199,17 +251,24 @@ class CentralReward:
             r_smooth = 0.5
         self._prev_action = action.copy()
 
+        # Weighted sum — stability weight now splits between stability and economy
+        w_stab = self.w.central_stability * 0.6
+        w_econ = self.w.central_stability * 0.4
+        w_smooth = 1.0 - self.w.central_frequency - self.w.central_tie_line - self.w.central_stability
+
         total = (
             self.w.central_frequency * r_frequency
             + self.w.central_tie_line * r_tie_line
-            + self.w.central_stability * r_stability
-            + (1.0 - self.w.central_frequency - self.w.central_tie_line - self.w.central_stability) * r_smooth
+            + w_stab * r_stability
+            + w_econ * r_economy
+            + w_smooth * r_smooth
         )
 
         breakdown = {
             "r_frequency": float(r_frequency),
             "r_tie_line": float(r_tie_line),
             "r_stability": float(r_stability),
+            "r_economy": float(r_economy),
             "r_smoothness": float(r_smooth),
             "total": float(total),
         }

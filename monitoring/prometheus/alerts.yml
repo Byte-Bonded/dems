@@ -1,0 +1,233 @@
+# DEMS Alert Rules for Prometheus
+# Aligned with IEEE standards for power system operation
+
+groups:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Frequency Stability Alerts (IEEE Std 1547-2018 §6.5)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: frequency_alerts
+    rules:
+      - alert: FrequencyDeviationWarning
+        expr: abs(dems_system_frequency_hz - 50) > 0.2
+        for: 30s
+        labels:
+          severity: warning
+          category: frequency
+        annotations:
+          summary: "System frequency deviation > 0.2 Hz"
+          description: "Current frequency: {{ $value }}Hz (target: 50Hz)"
+
+      - alert: FrequencyDeviationCritical
+        expr: abs(dems_system_frequency_hz - 50) > 0.5
+        for: 10s
+        labels:
+          severity: critical
+          category: frequency
+        annotations:
+          summary: "CRITICAL: Frequency deviation > 0.5 Hz - UFLS likely"
+          description: "Current frequency: {{ $value }}Hz. UFLS activation at 49.5Hz"
+
+      - alert: UnderFrequencyLoadShedding
+        expr: dems_ufls_activated == 1
+        for: 0s
+        labels:
+          severity: critical
+          category: protection
+        annotations:
+          summary: "UFLS protection activated"
+          description: "Under-frequency load shedding is active"
+
+      - alert: HighRoCoF
+        expr: abs(dems_rocof_hz_per_s) > 0.5
+        for: 5s
+        labels:
+          severity: warning
+          category: frequency
+        annotations:
+          summary: "High Rate-of-Change-of-Frequency detected"
+          description: "RoCoF: {{ $value }} Hz/s (threshold: ±0.5 Hz/s)"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Voltage Quality Alerts (IEEE Std 1547-2018 §6.4)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: voltage_alerts
+    rules:
+      - alert: VoltageDeviationWarning
+        expr: dems_min_voltage_pu < 0.95 or dems_max_voltage_pu > 1.05
+        for: 1m
+        labels:
+          severity: warning
+          category: voltage
+        annotations:
+          summary: "Voltage outside ±5% tolerance"
+          description: "Voltage range: {{ $labels.min_pu }}-{{ $labels.max_pu }} p.u."
+
+      - alert: VoltageDeviationCritical
+        expr: dems_min_voltage_pu < 0.90 or dems_max_voltage_pu > 1.10
+        for: 30s
+        labels:
+          severity: critical
+          category: voltage
+        annotations:
+          summary: "CRITICAL: Voltage outside ±10% - Equipment protection at risk"
+          description: "Min: {{ $labels.min_pu }} p.u., Max: {{ $labels.max_pu }} p.u."
+
+      - alert: VoltageViolationsHigh
+        expr: dems_voltage_violations_total > 10
+        for: 5m
+        labels:
+          severity: warning
+          category: voltage
+        annotations:
+          summary: "High number of voltage violations"
+          description: "{{ $value }} buses with voltage violations"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Power Balance Alerts
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: power_balance_alerts
+    rules:
+      - alert: HighSystemLosses
+        expr: dems_loss_percentage > 5
+        for: 5m
+        labels:
+          severity: warning
+          category: efficiency
+        annotations:
+          summary: "System losses exceed 5%"
+          description: "Current losses: {{ $value }}%"
+
+      - alert: GenerationLoadImbalance
+        expr: abs(dems_generation_mw - dems_load_mw) / dems_load_mw > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          category: balance
+        annotations:
+          summary: "Generation-load imbalance > 10%"
+          description: "Gen: {{ $labels.generation_mw }}MW, Load: {{ $labels.load_mw }}MW"
+
+      - alert: LineOverload
+        expr: dems_line_overloads > 0
+        for: 30s
+        labels:
+          severity: critical
+          category: congestion
+        annotations:
+          summary: "Transmission line overload detected"
+          description: "{{ $value }} lines operating above thermal limits"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DER Alerts
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: der_alerts
+    rules:
+      - alert: BatterySOCLow
+        expr: dems_battery_soc < 0.15
+        for: 5m
+        labels:
+          severity: warning
+          category: storage
+        annotations:
+          summary: "Battery SOC below 15%"
+          description: "Current SOC: {{ $value | humanizePercentage }}"
+
+      - alert: BatterySOCCritical
+        expr: dems_battery_soc < 0.05
+        for: 1m
+        labels:
+          severity: critical
+          category: storage
+        annotations:
+          summary: "CRITICAL: Battery nearly depleted"
+          description: "Current SOC: {{ $value | humanizePercentage }}"
+
+      - alert: HighRenewableCurtailment
+        expr: dems_solar_curtailment_frac > 0.2 or dems_wind_curtailment_frac > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          category: renewable
+        annotations:
+          summary: "High renewable curtailment (>20%)"
+          description: "Solar: {{ $labels.solar }}%, Wind: {{ $labels.wind }}%"
+
+      - alert: LowRenewableFraction
+        expr: dems_renewable_fraction < 0.15
+        for: 30m
+        labels:
+          severity: info
+          category: sustainability
+        annotations:
+          summary: "Renewable fraction below 15%"
+          description: "Current renewable fraction: {{ $value | humanizePercentage }}"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # RL Agent Alerts
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: rl_agent_alerts
+    rules:
+      - alert: AgentTrainingStalled
+        expr: increase(dems_rl_training_steps[10m]) == 0 and dems_rl_training_active == 1
+        for: 5m
+        labels:
+          severity: warning
+          category: training
+        annotations:
+          summary: "RL agent training has stalled"
+          description: "No training progress in the last 10 minutes"
+
+      - alert: AgentPolicyDegrading
+        expr: deriv(dems_rl_eval_reward[30m]) < -0.1
+        for: 15m
+        labels:
+          severity: warning
+          category: training
+        annotations:
+          summary: "RL agent performance degrading"
+          description: "Evaluation reward trending downward"
+
+      - alert: HighGridViolations
+        expr: dems_rl_episode_violations > 50
+        for: 0s
+        labels:
+          severity: warning
+          category: control
+        annotations:
+          summary: "High grid violations in current episode"
+          description: "{{ $value }} violations in current episode"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # System Health Alerts
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: system_health
+    rules:
+      - alert: APIHighLatency
+        expr: histogram_quantile(0.95, dems_api_request_duration_seconds_bucket) > 1
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "API p95 latency > 1s"
+          description: "95th percentile latency: {{ $value }}s"
+
+      - alert: SimulationSlowdown
+        expr: dems_simulation_step_time_seconds > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "Simulation step time exceeds 500ms"
+          description: "Step time: {{ $value }}s"
+
+      - alert: PowerFlowNotConverging
+        expr: dems_powerflow_convergence_failures > 0
+        for: 1m
+        labels:
+          severity: critical
+          category: simulation
+        annotations:
+          summary: "Power flow solver failing to converge"
+          description: "{{ $value }} consecutive convergence failures"

@@ -129,7 +129,7 @@ else:
     info['device'] = requested
 if info['device'] == 'cuda' and torch.cuda.is_available():
     info['gpu_name'] = torch.cuda.get_device_name(0)
-    info['gpu_mem_gb'] = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1)
+    info['gpu_mem_gb'] = round(torch.cuda.get_device_properties(0).total_mem / (1024**3), 1)
     info['cuda_version'] = torch.version.cuda or 'N/A'
     info['cudnn_version'] = str(torch.backends.cudnn.version()) if torch.backends.cudnn.is_available() else 'N/A'
     info['compute_capability'] = '.'.join(str(x) for x in torch.cuda.get_device_capability(0))

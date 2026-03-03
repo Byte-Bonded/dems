@@ -235,6 +235,10 @@ class PhysicsEngine:
         self._base_load_p: Optional[Dict[int, float]] = None
         self._base_load_q: Optional[Dict[int, float]] = None
 
+        # FIX PF-CONV: Store profile-set renewable output per DER name so
+        # curtailment is always absolute (from profile baseline) not relative
+        self._uncurtailed_sgen: Dict[str, float] = {}
+
         # Run initial power flow so grid state is populated
         self._solve_power_flow()
 
@@ -403,27 +407,48 @@ class PhysicsEngine:
         self.sg.set_generator_setpoint(gen_idx, p_mw)
 
     def apply_renewable_update(self, step: int) -> None:
-        """Update renewable generation from stochastic profiles."""
+        """Update renewable generation from stochastic profiles and snapshot uncurtailed values."""
         self._apply_profile_conditions(step)
+        # Snapshot the uncurtailed profile output so curtailment functions
+        # can work from the baseline instead of the (possibly already-curtailed) value.
+        dm = self.der_manager
+        if dm is not None:
+            for spec in dm.der_specs:
+                if spec.der_type in (DERType.SOLAR_PV, DERType.WIND):
+                    idx = dm.der_indices.get(spec.name)
+                    if idx is not None and idx in dm.net.sgen.index:
+                        self._uncurtailed_sgen[spec.name] = float(dm.net.sgen.at[idx, 'p_mw'])
 
     def apply_solar_curtailment(self, name: str, curtail_fraction: float) -> None:
-        """Apply solar curtailment (0=no curtail, 1=full curtail)."""
+        """Apply solar curtailment (0=no curtail, 1=full curtail).
+
+        FIX PF-CONV: Uses the snapshotted *uncurtailed* profile output as
+        baseline so multiple agents calling this don't compound.
+        """
         dm = self.der_manager
         if dm is None:
             return
         idx = dm.der_indices.get(name)
         if idx is not None and idx in dm.net.sgen.index:
-            uncurtailed = dm.net.sgen.at[idx, 'p_mw']
+            uncurtailed = self._uncurtailed_sgen.get(
+                name, float(dm.net.sgen.at[idx, 'p_mw'])
+            )
             dm.net.sgen.at[idx, 'p_mw'] = uncurtailed * (1.0 - np.clip(curtail_fraction, 0, 1))
 
     def apply_wind_curtailment(self, name: str, curtail_fraction: float) -> None:
-        """Apply wind curtailment (0=no curtail, 1=full curtail)."""
+        """Apply wind curtailment (0=no curtail, 1=full curtail).
+
+        FIX PF-CONV: Uses the snapshotted *uncurtailed* profile output as
+        baseline so multiple agents calling this don't compound.
+        """
         dm = self.der_manager
         if dm is None:
             return
         idx = dm.der_indices.get(name)
         if idx is not None and idx in dm.net.sgen.index:
-            uncurtailed = dm.net.sgen.at[idx, 'p_mw']
+            uncurtailed = self._uncurtailed_sgen.get(
+                name, float(dm.net.sgen.at[idx, 'p_mw'])
+            )
             dm.net.sgen.at[idx, 'p_mw'] = uncurtailed * (1.0 - np.clip(curtail_fraction, 0, 1))
 
     # ─── query methods ─────────────────────────────────────────────

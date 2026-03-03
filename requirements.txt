@@ -26,6 +26,10 @@ python-dotenv>=1.0.0
 pyyaml>=6.0.0
 requests>=2.28.0
 
+# --- Scientific / Control Analysis ---
+scipy>=1.10.0            # Transfer functions, Bode/Nyquist, eigenvalue analysis
+matplotlib>=3.7.0        # IEEE publication-quality figures
+
 # --- Streamlit Dashboard ---
 streamlit>=1.30.0
 plotly>=5.18.0

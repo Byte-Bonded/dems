@@ -19,7 +19,6 @@ import json
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import gymnasium as gym
 from dataclasses import dataclass, field
 
 from src.simulation.orchestrator import ScenarioConfig
@@ -66,9 +65,15 @@ class HierarchicalTrainer:
 
     Training loop:
     1. Collect rollouts from all agents simultaneously
-    2. Update policies (central → MG → sub) in round-robin fashion
+    2. Update policies (central → MG → sub)
     3. Evaluate periodically
     4. Checkpoint models
+
+    Usage::
+
+        trainer = HierarchicalTrainer(config=TrainingConfig())
+        trainer.train()
+        trainer.save_all("models/")
     """
 
     def __init__(
@@ -93,9 +98,6 @@ class HierarchicalTrainer:
         self.agents: Dict[str, PPOAgentWrapper] = {}
         self._create_agents()
 
-        # Wrap environments for round-robin training
-        self._wrap_envs()
-
         # Training history
         self.history: List[Dict] = []
         self._total_steps = 0
@@ -119,12 +121,12 @@ class HierarchicalTrainer:
                 limit_bytes = int(self.tc.gpu_vram_limit_gb * (1024 ** 3))
                 torch.cuda.set_per_process_memory_fraction(
                     self.tc.gpu_vram_limit_gb
-                    / (torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)),
+                    / (torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)),
                     device=0,
                 )
                 logger.info(
                     f"VRAM cap: {self.tc.gpu_vram_limit_gb:.1f} GB "
-                    f"({self.tc.gpu_vram_limit_gb / (torch.cuda.get_device_properties(0).total_memory / (1024**3)) * 100:.0f}% of total)"
+                    f"({self.tc.gpu_vram_limit_gb / (torch.cuda.get_device_properties(0).total_mem / (1024**3)) * 100:.0f}% of total)"
                 )
             except Exception as e:
                 logger.warning(f"Could not set VRAM cap: {e}")
@@ -168,22 +170,14 @@ class HierarchicalTrainer:
                 batch_size=sub_bs,
             )
 
-    def _wrap_envs(self) -> None:
-        """Wrap environments so they can be trained individually while others act."""
-        for name, agent in self.agents.items():
-            agent.model.set_env(
-                MultiAgentStepWrapper(
-                    env_name=name,
-                    coordinator=self.coordinator,
-                    agents=self.agents,
-                )
-            )
-
     # ─── training ───────────────────────────────────────────────────
 
     def train(self) -> Dict:
         """
         Run the full hierarchical training loop.
+
+        Collects experience via the coordinator and trains all agents
+        in a round-robin fashion.
 
         Returns:
             Training summary dict.
@@ -192,46 +186,44 @@ class HierarchicalTrainer:
         start_time = time.time()
 
         steps_done = 0
+        episode = 0
         best_eval_reward = -float("inf")
 
-        # Define training groups for round-robin
-        groups = [
-            ["central"],
-            [name for name in self.agents if name.startswith("mg_")],
-        ]
-        if self.tc.train_sub_agents:
-            groups.append([name for name in self.agents if "_" in name and not name.startswith("mg_")])
-
         while steps_done < self.tc.total_timesteps:
-            for group in groups:
-                # 1. Evaluate and Log before each group update
-                eval_reward = self._evaluate(n_episodes=1)
-                self.history.append({
-                    "steps_done": steps_done,
-                    "eval_reward": eval_reward,
-                })
-                logger.info(f"Steps: {steps_done}/{self.tc.total_timesteps} | Eval Reward: {eval_reward:.3f}")
+            # Collect one episode of experience
+            episode += 1
+            episode_rewards = self._run_episode()
+            episode_steps = self.coordinator._step_count
+            steps_done += episode_steps
 
+            # Log
+            avg_reward = {k: np.mean(v) for k, v in episode_rewards.items()}
+            self.history.append({
+                "episode": episode,
+                "steps_done": steps_done,
+                "rewards": avg_reward,
+            })
+
+            logger.info(
+                f"Episode {episode} | Steps: {steps_done}/{self.tc.total_timesteps} | "
+                f"Central reward: {avg_reward.get('central', 0):.3f}"
+            )
+
+            # Periodic evaluation
+            if steps_done % self.tc.eval_freq < episode_steps:
+                eval_reward = self._evaluate()
                 if eval_reward > best_eval_reward:
                     best_eval_reward = eval_reward
                     self.save_all(Path(self.tc.log_dir) / "best")
+                    logger.info(f"New best eval reward: {eval_reward:.3f}")
 
-                # 2. Update policies for this group
-                logger.info(f"Updating group: {group}")
-                for name in group:
-                    agent = self.agents[name]
-                    agent.learn(total_timesteps=self.tc.steps_per_level)
-                    steps_done += self.tc.steps_per_level
-
-                # Periodic checkpoint
-                if steps_done % self.tc.save_freq < (self.tc.steps_per_level * len(group)):
-                    self.save_all(Path(self.tc.log_dir) / f"checkpoint_{steps_done}")
-
-                if steps_done >= self.tc.total_timesteps:
-                    break
+            # Periodic checkpoint
+            if steps_done % self.tc.save_freq < episode_steps:
+                self.save_all(Path(self.tc.log_dir) / f"checkpoint_{steps_done}")
 
         elapsed = time.time() - start_time
         summary = {
+            "total_episodes": episode,
             "total_steps": steps_done,
             "elapsed_seconds": elapsed,
             "best_eval_reward": best_eval_reward,
@@ -239,14 +231,41 @@ class HierarchicalTrainer:
 
         # Save final models
         self.save_all(Path(self.tc.log_dir) / "final")
-        
+
         # Save history
         history_path = Path(self.tc.log_dir) / "training_history.json"
         history_path.parent.mkdir(parents=True, exist_ok=True)
         with open(history_path, "w") as f:
             json.dump(self.history, f, indent=2, default=str)
-            
+
+        logger.info(f"Training complete: {summary}")
         return summary
+
+    def _run_episode(self) -> Dict[str, List[float]]:
+        """Run one episode and collect rewards per agent."""
+        all_obs = self.coordinator.reset()
+        episode_rewards: Dict[str, List[float]] = {name: [] for name in self.agents}
+
+        while not self.coordinator.is_done:
+            # Get actions from all agents
+            actions = {}
+            for name, agent in self.agents.items():
+                obs = all_obs.get(name)
+                if obs is not None:
+                    actions[name] = agent.predict(obs, deterministic=False)
+                else:
+                    env = self.coordinator.get_env(name)
+                    actions[name] = np.zeros(env.action_space.shape)
+
+            # Step all agents
+            all_obs, all_rewards, done, info = self.coordinator.step(actions)
+
+            # Record rewards
+            for name, reward in all_rewards.items():
+                if name in episode_rewards:
+                    episode_rewards[name].append(reward)
+
+        return episode_rewards
 
     def _evaluate(self, n_episodes: Optional[int] = None) -> float:
         """Evaluate agents deterministically. Returns mean central reward."""
@@ -292,46 +311,3 @@ class HierarchicalTrainer:
             if model_path.with_suffix(".zip").exists():
                 agent.load(str(model_path))
         logger.info(f"Loaded agents from {directory}")
-
-
-class MultiAgentStepWrapper(gym.Env):
-    """
-    Gymnasium wrapper that lets one agent learn while others use their
-    latest policies to act in the coordinated hierarchy.
-    """
-    def __init__(self, env_name: str, coordinator: MultiAgentStepCoordinator, agents: Dict[str, PPOAgentWrapper]):
-        super().__init__()
-        self.env_name = env_name
-        self.coord = coordinator
-        self.agents = agents
-        
-        target_env = self.coord.get_env(env_name)
-        self.observation_space = target_env.observation_space
-        self.action_space = target_env.action_space
-        self._last_obs_dict = {}
-
-    def reset(self, seed=None, options=None):
-        self._last_obs_dict = self.coord.reset(seed=seed)
-        return self._last_obs_dict[self.env_name], {}
-
-    def step(self, action):
-        # 1. Prepare actions for ALL agents
-        actions_dict = {}
-        for name, agent in self.agents.items():
-            if name == self.env_name:
-                actions_dict[name] = action
-            else:
-                obs = self._last_obs_dict.get(name)
-                if obs is not None:
-                    actions_dict[name] = agent.predict(obs, deterministic=False)
-                else:
-                    env = self.coord.get_env(name)
-                    actions_dict[name] = np.zeros(env.action_space.shape)
-
-        # 2. Step the coordinator
-        self._last_obs_dict, rewards, done, info = self.coord.step(actions_dict)
-        
-        obs = self._last_obs_dict[self.env_name]
-        reward = rewards.get(self.env_name, 0.0)
-        
-        return obs, float(reward), done, False, info

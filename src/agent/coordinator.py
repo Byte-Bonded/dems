@@ -96,6 +96,7 @@ class MultiAgentStepCoordinator:
                 physics=self.physics,
                 area_id=area_id,
                 scenario=self.cfg,
+                sub_agents_active=enable_sub_agents,
             )
 
         # Sub-agent environments (optional)
@@ -199,26 +200,33 @@ class MultiAgentStepCoordinator:
         """
         self._step_count += 1
 
-        # 1. Central agent acts (produces coordination signals)
+        # 1. Apply renewable profile update FIRST so agents curtail from
+        #    the correct profile baseline (not stale values from last step).
+        #    FIX PF-CONV: This also snapshots _uncurtailed_sgen so
+        #    curtailment functions are absolute, not compounding.
+        self.physics.apply_renewable_update(self._step_count)
+
+        # 2. Central agent acts (produces coordination signals)
         central_action = actions.get("central", np.zeros(self.central_env.action_dim))
         c_obs, c_reward, c_term, c_trunc, c_info = self.central_env.step(central_action)
 
-        # 2. MG agents act (apply gen/DER setpoints to physics)
+        # 3. MG agents act
+        #    When sub-agents are enabled, MG env skips grid writes for
+        #    controls that sub-agents will handle (generators, renewables,
+        #    EV, DR) — it only stores its actions for reward/obs computation.
+        #    This prevents double-write conflicts.
         mg_results = {}
         for name, env in self.mg_envs.items():
             mg_action = actions.get(name, np.zeros(env.action_dim))
             mg_obs, mg_reward, mg_term, mg_trunc, mg_info = env.step(mg_action)
             mg_results[name] = (mg_obs, mg_reward, mg_term, mg_trunc, mg_info)
 
-        # 3. Sub-agents act (refine specific controls)
+        # 4. Sub-agents act (authoritative writers when enabled)
         sub_results = {}
         for name, env in self.sub_envs.items():
             sub_action = actions.get(name, np.zeros(env.action_space.shape[0]))
             sub_obs, sub_reward, sub_term, sub_trunc, sub_info = env.step(sub_action)
             sub_results[name] = (sub_obs, sub_reward, sub_term, sub_trunc, sub_info)
-
-        # 4. Apply renewable profile update
-        self.physics.apply_renewable_update(self._step_count)
 
         # 5. Step physics engine (one timestep: load profile + PF + dynamics)
         step_info = self.physics.step()

@@ -50,11 +50,15 @@ class MicrogridEnv(gym.Env):
         physics: PhysicsEngine,
         area_id: AreaID,
         scenario: Optional[ScenarioConfig] = None,
+        sub_agents_active: bool = False,
     ):
         super().__init__()
         self.physics = physics
         self.area_id = area_id
         self.cfg = scenario or ScenarioConfig()
+        # When sub-agents are enabled the MG env only stores actions for
+        # reward/obs; the sub-agents are the authoritative grid writers.
+        self._sub_agents_active = sub_agents_active
 
         # Discover controllable elements for this area
         self._gen_indices = physics.get_area_generators(area_id)
@@ -189,43 +193,52 @@ class MicrogridEnv(gym.Env):
     # ─── action application ─────────────────────────────────────────
 
     def _apply_actions(self, action: np.ndarray) -> None:
-        """Map flat action to physical commands."""
+        """Map flat action to physical commands.
+
+        FIX PF-CONV: When sub-agents are active, skip direct grid writes.
+        The sub-agents (inverter, renewable, load) are the authoritative
+        writers and will apply the controls themselves.
+        """
         idx = 0
         net = self.physics.sg.net
+        skip_grid = self._sub_agents_active
 
         # Generator setpoints
         for gi in self._gen_indices:
             frac = float(action[idx]) if idx < len(action) else 0.5
             idx += 1
-            p_min, p_max = self.physics.get_generator_limits(gi)
-            p_mw = p_min + frac * (p_max - p_min)
-            self.physics.apply_generator_setpoint(gi, p_mw)
+            if not skip_grid:
+                p_min, p_max = self.physics.get_generator_limits(gi)
+                p_mw = p_min + frac * (p_max - p_min)
+                self.physics.apply_generator_setpoint(gi, p_mw)
 
         # Solar curtailment
         for name in self._solar_names:
             curtail = float(action[idx]) if idx < len(action) else 0.0
             idx += 1
-            self.physics.apply_solar_curtailment(name, curtail)
+            if not skip_grid:
+                self.physics.apply_solar_curtailment(name, curtail)
 
         # Wind curtailment
         for name in self._wind_names:
             curtail = float(action[idx]) if idx < len(action) else 0.0
             idx += 1
-            self.physics.apply_wind_curtailment(name, curtail)
+            if not skip_grid:
+                self.physics.apply_wind_curtailment(name, curtail)
 
         # EV utilisation
         dm = self.physics.der_manager
         for name in self._ev_names:
             util = float(action[idx]) if idx < len(action) else 0.3
             idx += 1
-            if dm:
+            if not skip_grid and dm:
                 dm.set_ev_charging_load(name, util)
 
         # DR curtailment
         for name in self._dr_names:
             curtail = float(action[idx]) if idx < len(action) else 0.0
             idx += 1
-            if dm:
+            if not skip_grid and dm:
                 dm.set_demand_response_curtailment(name, curtail)
 
     # ─── observation building ───────────────────────────────────────
