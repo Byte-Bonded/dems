@@ -1,0 +1,498 @@
+================================================================================
+  DEMS — Dynamic Energy Management System
+  Full Project Context & Setup Reference
+  Generated: 3 March 2026
+================================================================================
+
+
+1. PROJECT OVERVIEW
+================================================================================
+
+DEMS is a realistic 117-bus tri-area power grid simulation with integrated
+Distributed Energy Resources (DER), IEEE-compliant dynamic models, and a
+Reinforcement Learning (RL) orchestrator for optimal energy management.
+
+  - Language        : Python 3.9+
+  - Grid Backend    : pandapower (Newton-Raphson AC power flow)
+  - RL Framework    : stable-baselines3 (PPO / SAC) + gymnasium
+  - Dashboard       : Streamlit + Plotly
+  - API             : FastAPI + Uvicorn
+  - Tests           : pytest (157 tests, all passing)
+  - License         : MIT
+
+
+2. DIRECTORY STRUCTURE
+================================================================================
+
+dems/
+├── config/
+│   └── config.py                 # Dataclass-based configuration (API, Grid, RL, Monitoring, Logging)
+├── src/
+│   ├── __init__.py
+│   ├── grid.py                   # Legacy grid wrapper
+│   ├── orchestrator.py           # Top-level orchestrator
+│   ├── agent/                    # RL AGENT MODULE
+│   │   ├── __init__.py
+│   │   ├── environment.py        # DEMSEnvironment (gymnasium-compatible, 315 lines)
+│   │   ├── rl_agent.py           # RLAgent class wrapping SB3 PPO/SAC (297 lines)
+│   │   ├── train_ppo.py          # Standalone CLI training script (225 lines)
+│   │   └── callbacks.py          # DEMSTrainingCallback for SB3 (165 lines)
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── main.py               # FastAPI application
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── energy_manager.py
+│   │   └── grid_manager.py
+│   ├── simulation/               # POWER SYSTEM SIMULATION
+│   │   ├── __init__.py
+│   │   ├── supergrid.py          # 117-bus tri-area SuperGrid (3× IEEE 39-bus merged)
+│   │   ├── dynamics.py           # IEEE standard dynamic models (swing eq, AVR, governor, PSS, AGC)
+│   │   ├── der.py                # DER models (solar, wind, battery, EV, demand response)
+│   │   ├── power_flow.py         # AC/DC power flow execution engine
+│   │   ├── orchestrator.py       # Grid simulation orchestrator for RL
+│   │   ├── microgrid.py          # Microgrid simulation module
+│   │   └── tie_lines.py          # Inter-area tie-line configuration
+│   └── utils/
+│       ├── __init__.py
+│       ├── decorators.py
+│       └── logging.py
+├── streamlit_app/                # STREAMLIT DASHBOARD
+│   ├── __init__.py
+│   ├── app.py                    # Main app entry point + landing page
+│   ├── components/               # Shared UI components (sidebar, metrics_cards, topology, charts)
+│   ├── pages/
+│   │   ├── 1_SuperGrid_Overview.py
+│   │   ├── 2_Area_Detail.py
+│   │   ├── 3_DER_Dashboard.py
+│   │   ├── 4_Dynamics_Monitor.py
+│   │   ├── 5_Microgrid_View.py
+│   │   ├── 6_Tie_Lines.py
+│   │   └── 7_RL_Agent.py         # RL dashboard (5 tabs, 1007 lines)
+│   └── simulation/               # Streamlit simulation engine (sim_engine, state_manager)
+├── tests/
+│   ├── conftest.py
+│   ├── test_dems.py
+│   ├── test_energy_manager.py
+│   ├── test_environment.py
+│   ├── test_grid_manager.py
+│   ├── test_rl_agent.py
+│   └── test_simulation.py
+├── logs/
+│   └── rl/                       # Trained model artifacts
+│       ├── dems_ppo_model.zip    # Final trained PPO model
+│       ├── dems_ppo_best.zip     # Best evaluated model
+│       ├── checkpoint_*.zip      # Periodic checkpoints (10k intervals)
+│       ├── training_history.json # Full training metrics + config
+│       └── best_eval.json        # Best evaluation result
+├── docs/                         # Architecture, API, DER guide, Simulation docs
+├── website/                      # Next.js marketing site
+├── requirements.txt
+├── README.md
+├── CONTRIBUTING.md
+├── IMPLEMENTATION_GUIDE.md
+├── PROJECT_SUMMARY.md
+└── RL_agent.md
+
+
+3. INSTALLATION & QUICK START
+================================================================================
+
+  # Clone and install
+  cd dems/
+  pip install -r requirements.txt
+
+  # Run tests (157 should pass)
+  python -m pytest tests/ -v
+
+  # Train RL agent (100k timesteps, ~50 seconds on CPU)
+  python -m src.agent.train_ppo --timesteps 100000
+
+  # Launch Streamlit dashboard
+  python -m streamlit run streamlit_app/app.py --server.port 8501
+
+  # Launch API server
+  uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+
+Dependencies (requirements.txt):
+  pandapower>=3.0.0      numpy>=1.21.0       pandas>=1.3.0
+  networkx>=3.2.0        stable-baselines3>=2.0.0  gymnasium>=0.29.0
+  fastapi>=0.100.0       uvicorn[standard]>=0.22.0  pydantic>=2.0.0
+  prometheus-client>=0.17.0  python-dotenv>=1.0.0  pyyaml>=6.0.0
+  requests>=2.28.0       streamlit>=1.30.0    plotly>=5.18.0
+  pytest>=7.0.0          pytest-asyncio>=0.21.0  pytest-cov>=4.0.0
+
+
+4. CONFIGURATION
+================================================================================
+
+All configuration lives in config/config.py using Python dataclasses
+with environment variable overrides:
+
+  APIConfig:
+    host = "0.0.0.0"  (env: API_HOST)
+    port = 8000        (env: API_PORT)
+    debug = False      (env: API_DEBUG)
+    workers = 4
+
+  GridConfig:
+    num_areas = 3
+    buses_per_area = 39
+    nominal_frequency = 50.0 Hz
+    voltage_limits = (0.95, 1.05) pu
+    frequency_limits = (49.5, 50.5) Hz
+
+  RLConfig:
+    algorithm = "PPO"
+    learning_rate = 0.0003
+    batch_size = 64
+    n_steps = 2048
+    gamma = 0.99
+    tensorboard_log = "logs/rl/tensorboard"
+
+  MonitoringConfig:
+    prometheus_port = 9090
+    grafana_port = 3000
+    metrics_interval = 1.0 s
+
+  LoggingConfig:
+    level = "INFO"
+    log_dir = "logs"
+    log_to_file = True
+
+
+5. POWER SYSTEM SIMULATION
+================================================================================
+
+5.1 SuperGrid (src/simulation/supergrid.py)
+  - 117-bus system: 3 × IEEE 39-bus (New England) areas merged
+  - 8 N-1-secure inter-area tie-lines
+  - Builds on pandapower for AC power flow (Newton-Raphson)
+
+5.2 Dynamic Models (src/simulation/dynamics.py)
+  - Swing equation: symplectic Euler integration, 2H inertia constant
+  - Field flux model with d-axis transient reactance
+  - IEEE 421.5 IEEET1 AVR with saturation, KF feedback, OEL
+  - IEEE/NERC TGOV1 Governor with valve rate limits, turbine damping
+  - IEEE 421.5 PSS1A: washout + 2 lead-lag stages, DC gain = 1
+  - AGC: PI-based secondary frequency control, IEGC 0.03 Hz deadband
+  - Protection: multi-stage UFLS (49.5/49.2/49.0 Hz), OFGT (50.5 Hz), voltage trip
+  - ULTC Tap Changers
+
+5.3 DER Models (src/simulation/der.py)
+  - Solar PV        : 205 MW total, irradiance-based
+  - Wind Turbine    : 250 MW total, IEC 61400 power curve
+  - Battery Storage : 120 MWh, SoC-constrained
+  - EV Fleet        : 200 chargers, scheduling-based
+  - Demand Response : 36.5 MW, IEEE 1547-2018 ride-through
+
+5.4 Power Flow (src/simulation/power_flow.py)
+  - AC/DC power flow execution on the SuperGrid
+  - Post-processing: bus voltages, line loadings, losses
+
+5.5 Orchestrator (src/simulation/orchestrator.py)
+  - Single entry point for RL agent interaction
+  - 42-dim observation, variable-dim action, multi-objective reward
+
+
+6. RL AGENT SYSTEM
+================================================================================
+
+6.1 Environment — DEMSEnvironment (src/agent/environment.py)
+
+  A gymnasium-compatible MDP for a 10-node microgrid:
+
+  OBSERVATION SPACE (44-dim, normalised to [0, 1]):
+    Per node (×10, 4 features each = 40 dims):
+      [0] storage_ratio      — battery SoC / max_capacity
+      [1] demand_ratio        — current demand / max_demand
+      [2] generation_ratio    — current renewable gen / max_gen
+      [3] local_imbalance     — (gen − demand) centred at 0.5
+
+    Global (4 dims):
+      [40] freq_norm          — (freq − 49.5) / 1.0
+      [41] voltage_norm       — (volt − 220) / 20.0
+      [42] time_progress      — current_step / max_steps
+      [43] avg_soc            — mean(storage) / max_capacity
+
+  ACTION SPACE (10-dim, continuous [0, 1]):
+    Per node: 0 = full discharge (−10 kWh), 0.5 = neutral, 1 = full charge (+10 kWh)
+
+  DYNAMICS:
+    Each step:
+      1. Stochastic demand: base_demand × (1 ± 0.20 noise), clipped to 1.5× base
+      2. Renewable generation: base_gen × (1 ± 0.25 noise) × solar_curve(t)
+      3. Agent action → charge/discharge: (action − 0.5) × 2 × rate
+      4. Battery constraints: clip charge to [−stored, headroom]
+      5. Storage update: storage += charge_discharge
+      6. Grid balance: net_power = Σ gen − Σ demand − Σ battery
+      7. Frequency: 50 Hz + clip(net_power / Σ demand × 0.5, ±0.5)
+      8. Voltage: 230V + clip((avg_soc − 0.5) × 20, ±10)
+
+  PHYSICAL PARAMETERS:
+    max_storage_per_node     = 100.0 kWh
+    charge_discharge_rate    = 10.0 kWh/step
+    base_demand_per_node     = 20.0 kWh
+    demand_variance          = 0.20 (±20%)
+    base_generation_per_node = 22.0 kWh (slightly above avg demand)
+    generation_variance      = 0.25 (±25%)
+    frequency_range          = 49.5 – 50.5 Hz
+    nominal_voltage          = 230 V ± 10 V
+
+  REWARD FUNCTION (max ≈ 3.8 per step):
+    Component 1 — Supply-demand balance (primary, up to 2.0):
+      2.0 × max(0, 1 − supply_demand_error × 5)
+
+    Component 2 — Frequency stability (up to 1.0):
+      1.0 × max(0, 1 − |freq − 50| / 0.5)
+
+    Component 3 — Battery SoC near 50% (up to 0.5):
+      0.5 × max(0, 1 − |avg_soc − 0.5| / 0.4)
+
+    Component 4 — Action smoothness (up to 0.3):
+      0.3 × max(0, 1 − mean(|action − prev_action|) / 0.5)
+
+    Component 5 — Critical SoC penalty:
+      −0.1 per node with SoC < 10% or > 90%
+
+  The optimal strategy: absorb excess renewable generation when available,
+  discharge to cover deficits, keeping SoC near 50% and frequency at 50 Hz.
+
+6.2 Agent — RLAgent (src/agent/rl_agent.py)
+
+  Wraps stable-baselines3 PPO or SAC.
+
+  PPO configuration:
+    policy           = "MlpPolicy"
+    net_arch         = {pi: [128, 128], vf: [128, 128]}
+    learning_rate    = 3e-4
+    n_steps          = 2048 (rollout buffer size)
+    batch_size       = 64
+    n_epochs         = 10 (SGD passes per update)
+    gamma            = 0.99
+    gae_lambda       = 0.95
+    clip_range       = 0.2
+    ent_coef         = 0.01 (entropy bonus for exploration)
+    vf_coef          = 0.5
+    max_grad_norm    = 0.5
+    normalize_advantage = True
+
+  Key methods:
+    predict(state, deterministic) → (action, info)
+    train(total_timesteps, callback) → status dict
+    evaluate(n_episodes=10) → {mean_reward, std_reward}
+    save(path) / load(path)
+
+6.3 Training Script (src/agent/train_ppo.py)
+
+  CLI command:
+    python -m src.agent.train_ppo [options]
+
+  Default training config:
+    --timesteps     100,000
+    --nodes         10
+    --max-steps     200 (steps per episode)
+    --lr            3e-4
+    --n-steps       2048
+    --batch-size    64
+    --n-epochs      10
+    --gamma         0.99
+    --gae-lambda    0.95
+    --clip-range    0.2
+    --ent-coef      0.01
+    --checkpoint-freq 10,000
+    --resume        (flag, loads from previous model)
+
+  Training pipeline:
+    1. Create DEMSEnvironment(num_nodes, max_steps)
+    2. Create RLAgent(env, "PPO", learning_rate)
+    3. Optionally resume from logs/rl/dems_ppo_model.zip
+    4. Override SB3 hyperparams on model object
+    5. Create DEMSTrainingCallback
+    6. Call agent.train(total_timesteps, callback)
+    7. Save final model → logs/rl/dems_ppo_model.zip
+    8. Evaluate 10 episodes → save best → logs/rl/dems_ppo_best.zip
+    9. Save training_history.json with config + all tracked metrics
+
+6.4 Callback — DEMSTrainingCallback (src/agent/callbacks.py)
+
+  Custom SB3 BaseCallback that tracks during training:
+    - episode_rewards, episode_lengths, episode_mean_rewards (100-ep window)
+    - timesteps_log, wall_times
+    - avg_frequency_penalties, avg_storage_ratios
+    - policy_losses, value_losses, entropies (from SB3 logger)
+
+  Features:
+    - Logs summary every 10 episodes
+    - Saves periodic checkpoint_XXXXX.zip files
+    - Dumps full history to JSON on training end
+
+6.5 Current Training Results
+
+  Training run: 100,000 timesteps, 501 episodes, 48.8 seconds (CPU)
+
+  Evaluation (10 episodes):
+    Mean reward    : 527.15 ± 5.75
+    Model path     : logs/rl/dems_ppo_model.zip
+    Checkpoints    : 10k, 20k, 30k, 40k, 50k, 60k, 70k, 80k, 90k, 100k
+
+  PPO vs Random comparison (3-seed average):
+    ┌─────────────────┬──────────┬──────────┬─────────────┐
+    │ Metric          │ Random   │ PPO      │ Improvement │
+    ├─────────────────┼──────────┼──────────┼─────────────┤
+    │ Total Reward    │ 416      │ 522      │ +25%        │
+    │ Avg SoC         │ varies   │ ~0.47    │ closer to   │
+    │                 │          │          │ 0.50 target │
+    │ Freq Deviation  │ 0.061 Hz │ 0.049 Hz │ −19%        │
+    │ S-D Error       │ 0.122    │ 0.099    │ −19%        │
+    └─────────────────┴──────────┴──────────┴─────────────┘
+
+
+7. STREAMLIT DASHBOARD
+================================================================================
+
+Entry point: python -m streamlit run streamlit_app/app.py --server.port 8501
+
+Landing page (app.py):
+  - Hero: "⚡ DEMS Grid Dashboard — 117-Bus Tri-Area SuperGrid"
+  - 6 metric cards: Generation, Load, Losses, Frequency, Avg Voltage, Status
+  - Grid topology graph + Power Balance chart + Frequency chart
+
+Page 1 — SuperGrid Overview:
+  Full 117-bus network view, area breakdown, bus voltage heatmap
+
+Page 2 — Area Detail:
+  Per-area deep dive: generators, loads, voltage profiles
+
+Page 3 — DER Dashboard:
+  Solar, wind, battery, EV, demand response status and dispatch
+
+Page 4 — Dynamics Monitor:
+  Generator frequencies, rotor angles, protection relay status
+  (AGC removed; protection relay generation added)
+
+Page 5 — Microgrid View:
+  Microgrid-level simulation and metrics
+
+Page 6 — Tie Lines:
+  Inter-area tie-line power flows and loading
+
+Page 7 — RL Agent (5 tabs, 1007 lines):
+  Tab 1 — 🏋️ Training:
+    One-click PPO training with configurable hyperparameters
+    (timesteps, learning rate, batch size, entropy coeff, etc.)
+    Real-time progress display via callback
+
+  Tab 2 — 📊 Results & Metrics:
+    Reward curves, loss plots (policy, value, entropy),
+    grid metrics (frequency penalty, storage ratio over episodes)
+    Loaded from training_history.json
+
+  Tab 3 — 🎬 Live Rollout:
+    Step-by-step episode replay with PPO vs Random comparison
+    4-panel chart: cumulative reward, frequency, storage ratio, actions
+    Action heatmap over time
+
+  Tab 4 — 💾 Model Management:
+    Model file listing, checkpoint browser, save/load/delete
+    Raw training history JSON viewer
+
+  Tab 5 — 🔋 Before vs After:
+    Side-by-side PPO vs Random on identical seed:
+    - Summary comparison cards (reward, SoC, freq dev, S-D error)
+    - Per-node SoC traces (10 nodes, 2-column)
+    - Charge/discharge action heatmaps
+    - Battery utilization efficiency (useful vs wasted, stacked bar)
+    - Grid stability (frequency + S-D error timeseries overlaid)
+    - Distribution comparison (reward histogram + SoC histogram)
+    - Key insights table with auto-generated prose
+
+Shared components:
+  - sidebar.py       → render_sidebar() with navigation + sim controls
+  - metrics_cards.py → metric_card() styled cards with deltas
+  - status_indicators.py → grid status badges
+  - topology_graph.py → network visualization
+  - time_series_charts.py → standard chart templates
+
+
+8. KEY FIXES & DESIGN DECISIONS (Historical)
+================================================================================
+
+8.1 Environment Rewrite (Critical)
+  PROBLEM: Original environment had 6 fundamental bugs:
+    1. Storage drained by demand — new_storage = storage + charge − loads
+       (batteries emptied in ~5 steps since demand >> max charge)
+    2. No generation source — grid had no renewable/conventional generation
+    3. Broken S-D calc — total_gen = sum(cd) + sum(demand) was nonsensical
+    4. Global obs never updated — indices 40–43 only set at reset
+    5. Redundant per-node obs — same freq+volt repeated 10× per node
+    6. No battery constraints — could charge a full battery
+
+  FIX: Complete rewrite with proper physics:
+    - Added renewable generation (22 kWh/node base, solar curve + noise)
+    - Battery only changes via agent action (not drained by demand)
+    - Proper grid balance: net = Σ gen − Σ demand − Σ battery
+    - Per-node obs now [storage, demand, generation, local_imbalance]
+    - Global obs updated every step (freq, volt, time_progress, avg_soc)
+    - Battery clipped to [−stored, headroom]
+
+8.2 Reward Reshaping
+  PROBLEM: Old reward was flat (~1.8 for everything), no gradient signal.
+  FIX: 5-component weighted reward (max 3.8/step) with S-D balance as
+  dominant signal (2.0 weight), driving the agent to learn grid balancing.
+
+8.3 PPO Hyperparameters
+  PROBLEM: 20k timesteps = ~10 PPO gradient updates, too few to learn.
+  FIX: 100k timesteps (480 updates), [128,128] network (was [64,64]),
+  entropy bonus ent_coef=0.01 for exploration, normalize_advantage=True.
+
+8.4 Dynamics Monitor Fix
+  PROBLEM: Generator freq, rotor angles, protection relay showed "not available".
+  FIX: Bug in sim_engine.py _capture() — dynamics data was inside an
+  unreachable math.isnan() guard. Moved outside the guard. Added synthetic
+  protection relay generation.
+
+8.5 AGC Removal
+  Removed AGC from Dynamics Monitor page and synthetic dynamics since the
+  simulation doesn't implement full secondary frequency control in Streamlit.
+
+
+9. TESTING
+================================================================================
+
+Test framework: pytest
+Total tests: 157 (all passing)
+
+Test files:
+  test_dems.py           — Grid init, power flow, topology, DER integration,
+                           dynamics, full workflow
+  test_energy_manager.py — Energy management core logic
+  test_environment.py    — DEMSEnvironment reset, step, obs shape, reward
+  test_grid_manager.py   — Grid manager operations
+  test_rl_agent.py       — RLAgent predict, train, save/load, evaluate
+  test_simulation.py     — SuperGrid, power flow, dynamics, DER, orchestrator
+
+Run tests:
+  python -m pytest tests/ -v                    # all tests
+  python -m pytest tests/test_rl_agent.py -v    # RL agent only
+  python -m pytest tests/ -k "environment" -v   # environment only
+
+
+10. IEEE COMPLIANCE
+================================================================================
+
+  ┌──────────────────────┬──────────────────────────────────────┐
+  │ Standard             │ Implementation                       │
+  ├──────────────────────┼──────────────────────────────────────┤
+  │ IEEE 39-bus          │ 3× merged into 117-bus SuperGrid     │
+  │ IEEE 421.5-2016      │ IEEET1 AVR, OEL, PSS1A              │
+  │ IEEE/NERC TGOV1      │ Governor with valve rate limits      │
+  │ IEEE 1547-2018       │ DER ride-through, anti-islanding     │
+  │ IEC 61400            │ Wind turbine power curve             │
+  │ IEGC                 │ AGC with 0.03 Hz deadband            │
+  └──────────────────────┴──────────────────────────────────────┘
+
+
+================================================================================
+  END OF CONTEXT
+================================================================================
