@@ -772,20 +772,18 @@ class SuperGrid:
         Populate the DERManager with a predefined set of distributed energy resources for all three areas.
         
         Adds the following default DERs:
-        - Area A (bus offsets applied): solar PV at buses 3, 7, 15; a battery at bus 20; EV charging stations at buses 4 and 12; demand response at bus 8.
-        - Area B (39-bus offset): wind farms at buses 39+3 and 39+8; a battery at bus 39+15; an EV charging station at bus 39+7; demand response at buses 39+20 and 39+18.
-        - Area C (78-bus offset): solar PV at bus 78+4; a wind farm at bus 78+12; a battery at bus 78+25; EV charging stations at buses 78+8 and 78+16; demand response at bus 78+15.
+        - Area A (bus offsets applied): solar PV at buses 3, 7, 15; EV charging stations at buses 4 and 12; demand response at bus 8.
+        - Area B (39-bus offset): wind farms at buses 39+3 and 39+8; an EV charging station at bus 39+7; demand response at buses 39+20 and 39+18.
+        - Area C (78-bus offset): solar PV at bus 78+4; a wind farm at bus 78+12; EV charging stations at buses 78+8 and 78+16; demand response at bus 78+15.
         
         After adding resources, logs a short summary of the number of DER units and aggregated capacity by DER type.
         """
         logger.info("Adding default DER configuration...")
         
         # Area A (North) - Solar dominated with EV infrastructure
-        # Add solar PV at load buses (where there's demand)
         self.der_manager.add_solar_pv(bus=3, capacity_mw=50, name="Solar_A1", area_id="A")
         self.der_manager.add_solar_pv(bus=7, capacity_mw=40, name="Solar_A2", area_id="A")
         self.der_manager.add_solar_pv(bus=15, capacity_mw=60, name="Solar_A3", area_id="A")
-        self.der_manager.add_battery(bus=20, power_mw=30, energy_mwh=120, name="BESS_A1", area_id="A")
         
         # EV charging stations in Area A
         self.der_manager.add_ev_charging_station(bus=4, num_chargers=50, charger_power_kw=50, name="EV_Station_A1", area_id="A")
@@ -797,7 +795,6 @@ class SuperGrid:
         # Area B (West) - Wind dominated with commercial DR
         self.der_manager.add_wind_turbine(bus=39+3, capacity_mw=80, name="Wind_B1", area_id="B", num_turbines=20)
         self.der_manager.add_wind_turbine(bus=39+8, capacity_mw=100, name="Wind_B2", area_id="B", num_turbines=25)
-        self.der_manager.add_battery(bus=39+15, power_mw=40, energy_mwh=160, name="BESS_B1", area_id="B")
         
         # EV charging in Area B
         self.der_manager.add_ev_charging_station(bus=39+7, num_chargers=40, charger_power_kw=50, name="EV_Station_B1", area_id="B")
@@ -809,7 +806,6 @@ class SuperGrid:
         # Area C (East) - Hybrid with residential DR
         self.der_manager.add_solar_pv(bus=78+4, capacity_mw=55, name="Solar_C1", area_id="C")
         self.der_manager.add_wind_turbine(bus=78+12, capacity_mw=70, name="Wind_C1", area_id="C", num_turbines=18)
-        self.der_manager.add_battery(bus=78+25, power_mw=50, energy_mwh=200, name="BESS_C1", area_id="C")
         
         # EV charging in Area C
         self.der_manager.add_ev_charging_station(bus=78+8, num_chargers=60, charger_power_kw=50, name="EV_Station_C1", area_id="C")
@@ -1003,16 +999,20 @@ class SuperGrid:
         # Calculate net interchange (generation - load = export)
         total_gen = area_gen_results.p_mw.sum()
         total_load = area_load_results.p_mw.sum()
-        
+
+        # Guard against NaN from non-converged PF
+        import math
+        _safe = lambda v, d=0.0: d if (isinstance(v, float) and math.isnan(v)) else v
+
         return {
             "area_id": area_id.value,
             "area_name": area.name,
-            "total_generation_mw": float(total_gen),
-            "total_load_mw": float(total_load),
-            "net_interchange_mw": float(total_gen - total_load),
-            "avg_voltage_pu": float(area_buses.vm_pu.mean()),
-            "min_voltage_pu": float(area_buses.vm_pu.min()),
-            "max_voltage_pu": float(area_buses.vm_pu.max()),
+            "total_generation_mw": float(_safe(total_gen)),
+            "total_load_mw": float(_safe(total_load)),
+            "net_interchange_mw": float(_safe(total_gen - total_load)),
+            "avg_voltage_pu": float(_safe(area_buses.vm_pu.mean(), 1.0)),
+            "min_voltage_pu": float(_safe(area_buses.vm_pu.min(), 1.0)),
+            "max_voltage_pu": float(_safe(area_buses.vm_pu.max(), 1.0)),
             "num_generators": len(area.generator_indices),
             "num_loads": len(area.load_indices),
         }
@@ -1044,16 +1044,20 @@ class SuperGrid:
         for idx in tie_line_indices:
             line_result = self.net.res_line.loc[idx]
             line_data = self.net.line.loc[idx]
-            
+
+            import math
+            _s = lambda v, d=0.0: d if (isinstance(v, float) and math.isnan(v)) else v
+
             tie_line_flows.append({
                 "name": line_data["name"],
                 "from_bus": int(line_data["from_bus"]),
                 "to_bus": int(line_data["to_bus"]),
-                "p_from_mw": float(line_result.p_from_mw),
-                "p_to_mw": float(line_result.p_to_mw),
-                "q_from_mvar": float(line_result.q_from_mvar),
-                "loading_percent": float(line_result.loading_percent),
-                "is_overloaded": bool(line_result.loading_percent > 100.0),
+                "p_from_mw": float(_s(line_result.p_from_mw)),
+                "p_to_mw": float(_s(line_result.p_to_mw)),
+                "q_from_mvar": float(_s(line_result.q_from_mvar)),
+                "loading_percent": float(_s(line_result.loading_percent)),
+                "is_overloaded": bool(_s(line_result.loading_percent) > 100.0),
+                "flow_mw": float(_s(line_result.p_from_mw)),
             })
             
         return tie_line_flows
@@ -1104,6 +1108,11 @@ class SuperGrid:
                 total_losses += self.net.res_trafo.pl_mw.sum()
         else:
             total_losses = total_gen - total_load  # fallback before first PF
+
+        # Guard NaN from non-converged PF
+        import math
+        if isinstance(total_losses, float) and math.isnan(total_losses):
+            total_losses = 0.0
         
         # Check for any violations
         voltage_violations = any(

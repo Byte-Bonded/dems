@@ -4,9 +4,10 @@ Pandapower-based Tri-Area Super-Grid simulation engine
 
 Includes:
 - 117-bus SuperGrid (3× IEEE 39-bus)
-- DER management (Solar, Wind, Battery, EV, DR)
+- DER management (Solar, Wind, EV, DR)
 - Power flow analysis
 - Dynamic models (generators, AVR, governor, AGC)
+- Physics engine for multi-agent RL
 - Microgrid simulation (standalone NR solver, DER components)
 """
 
@@ -27,13 +28,10 @@ from .dynamics import (
     LoadFrequencyController,
 )
 from .orchestrator import (
-    GridOrchestrator,
+    PhysicsEngine,
+    GridOrchestrator,  # backward compat alias
     ScenarioConfig,
     StochasticProfileGenerator,
-    ObservationBuilder,
-    RewardCalculator,
-    ActionMapper,
-    ActionType,
 )
 from .microgrid import (
     MicrogridCase,
@@ -41,7 +39,6 @@ from .microgrid import (
     MicrogridController,
     SolarPV,
     WindTurbine,
-    BatteryESS,
     DieselGenerator,
     DERComponent as MicrogridDERComponent,
     create_example_microgrid,
@@ -76,12 +73,19 @@ __all__ = [
     "ProtectionRelay",
     "IEEE39_GENERATOR_DATA",
     "LoadFrequencyController",
-    # Orchestrator (RL entry point)
-    "GridOrchestrator",
+    # Physics Engine (multi-agent RL entry point)
+    "PhysicsEngine",
+    "GridOrchestrator",  # backward compat alias
     "ScenarioConfig",
     "StochasticProfileGenerator",
-    "ObservationBuilder",
-    "RewardCalculator",
-    "ActionMapper",
-    "ActionType",
+    # Microgrid
+    "MicrogridCase",
+    "PowerFlowSolver",
+    "MicrogridController",
+    "SolarPV",
+    "WindTurbine",
+    "DieselGenerator",
+    "MicrogridDERComponent",
+    "create_example_microgrid",
+    "create_ieee14_case",
 ]

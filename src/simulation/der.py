@@ -30,7 +30,6 @@ class DERType(Enum):
     """Types of Distributed Energy Resources"""
     SOLAR_PV = "solar"
     WIND = "wind"
-    BESS = "battery"
     EV_CHARGING = "ev_charging"
     DEMAND_RESPONSE = "demand_response"
 
@@ -51,12 +50,6 @@ class DERSpec:
     # Wind specific
     turbine_capacity_mw: Optional[float] = None
     num_turbines: Optional[int] = None
-    
-    # Battery specific
-    energy_capacity_mwh: Optional[float] = None
-    charge_rate_mw: Optional[float] = None
-    discharge_rate_mw: Optional[float] = None
-    initial_soc: float = 0.5  # State of charge (0-1)
     
     # EV Charging specific
     num_chargers: Optional[int] = None
@@ -83,10 +76,6 @@ class DERState:
     capacity_mw: float
     availability: float  # 0-1
     
-    # Battery specific
-    soc: Optional[float] = None
-    charging: Optional[bool] = None
-    
     # EV Charging specific
     utilization: Optional[float] = None  # 0-1
     num_active_chargers: Optional[int] = None
@@ -96,50 +85,7 @@ class DERState:
     curtailed_load_mw: Optional[float] = None
 
 
-@dataclass
-class BatteryState:
-    """Comprehensive battery state tracking with degradation"""
-    name: str
-    soc: float  # State of charge (0-1)
-    capacity_mwh: float  # Current effective capacity
-    nominal_capacity_mwh: float  # Original capacity
-    total_cycles: float = 0.0  # Total equivalent full cycles
-    last_update: datetime = field(default_factory=datetime.now)
-    round_trip_efficiency: float = 0.92  # 92% typical for Li-ion
-    degradation_factor: float = 1.0  # Health factor (1.0 = new)
-    
-    def update_soc(self, delta_energy_mwh: float) -> float:
-        """
-        Update SOC accounting for efficiency and track cycles.
-        
-        Args:
-            delta_energy_mwh: Energy change (positive=discharge, negative=charge)
-            
-        Returns:
-            Actual energy delivered/absorbed after efficiency
-        """
-        # FIX BUG-15: Symmetric battery efficiency using sqrt(η_rt)
-        sqrt_eff = np.sqrt(self.round_trip_efficiency)
-        if delta_energy_mwh > 0:  # Discharging
-            actual_energy = delta_energy_mwh / sqrt_eff
-            soc_delta = -actual_energy / self.capacity_mwh
-        else:  # Charging
-            actual_energy = delta_energy_mwh * sqrt_eff
-            soc_delta = -actual_energy / self.capacity_mwh
-        
-        # Update SOC with bounds
-        old_soc = self.soc
-        self.soc = np.clip(self.soc + soc_delta, 0.0, 1.0)
-        
-        # Track cycles (one full charge + discharge = 1 cycle)
-        self.total_cycles += abs(self.soc - old_soc) / 2
-        
-        # Update degradation (simple linear model: 20% loss at 5000 cycles)
-        self.degradation_factor = max(0.8, 1.0 - (self.total_cycles / 5000) * 0.2)
-        self.capacity_mwh = self.nominal_capacity_mwh * self.degradation_factor
-        
-        self.last_update = datetime.now()
-        return actual_energy
+# NOTE: BatteryState class removed — battery SOC management stripped per multi-agent redesign
 
 
 class DERManager:
@@ -173,8 +119,6 @@ class DERManager:
         self.net = net
         self.der_specs: List[DERSpec] = []
         self.der_indices: Dict[str, int] = {}  # name -> pandapower index
-        self.battery_soc: Dict[str, float] = {}  # name -> state of charge (legacy)
-        self._battery_states: Dict[str, BatteryState] = {}  # Enhanced battery tracking
         self._lock = threading.RLock()  # Reentrant lock for thread safety
         # FIX BUG-13: Dict-based spec lookup for O(1) access
         self._spec_by_name: Dict[str, DERSpec] = {}
@@ -291,71 +235,7 @@ class DERManager:
         logger.info(f"Added Wind Farm: {name} at Bus {bus}, {capacity_mw} MW capacity ({num_turbines} turbines)")
         return idx
         
-    def add_battery(
-        self,
-        bus: int,
-        power_mw: float,
-        energy_mwh: float,
-        name: str,
-        area_id: str,
-        initial_soc: float = 0.5
-    ) -> int:
-        """
-        Register a battery energy storage system (BESS) and add a controllable storage element to the pandapower network.
-        
-        Parameters:
-            bus (int): Bus index where the battery is connected.
-            power_mw (float): Maximum charge/discharge power in MW.
-            energy_mwh (float): Energy capacity in MWh.
-            name (str): Unique identifier for the battery.
-            area_id (str): Area identifier for grouping or reporting.
-            initial_soc (float): Initial state of charge as a fraction between 0 and 1.
-        
-        Returns:
-            int: Index of the created storage element.
-        """
-        spec = DERSpec(
-            der_type=DERType.BESS,
-            bus=bus,
-            capacity_mw=power_mw,
-            name=name,
-            area_id=area_id,
-            energy_capacity_mwh=energy_mwh,
-            charge_rate_mw=power_mw,
-            discharge_rate_mw=power_mw,
-            initial_soc=initial_soc
-        )
-        self.der_specs.append(spec)
-        self._spec_by_name[spec.name] = spec
-        self.battery_soc[name] = initial_soc
-        
-        # FIX I04: Populate _battery_states for enhanced tracking
-        self._battery_states[name] = BatteryState(
-            name=name,
-            soc=initial_soc,
-            capacity_mwh=energy_mwh,
-            nominal_capacity_mwh=energy_mwh,
-        )
-        
-        # Add as storage element
-        idx = pp.create_storage(
-            self.net,
-            bus=bus,
-            p_mw=0,  # Start at zero (neutral)
-            max_e_mwh=energy_mwh,
-            q_mvar=0,
-            soc_percent=initial_soc * 100,
-            min_e_mwh=0,
-            name=name,
-            type="BESS",
-            controllable=True,
-            max_p_mw=power_mw,
-            min_p_mw=-power_mw  # Negative = charging
-        )
-        self.der_indices[name] = idx
-        
-        logger.info(f"Added Battery: {name} at Bus {bus}, {power_mw} MW / {energy_mwh} MWh")
-        return idx
+    # NOTE: add_battery() removed — battery SOC management stripped per multi-agent redesign
         
     def add_ev_charging_station(
         self,
@@ -596,52 +476,7 @@ class DERManager:
             
             logger.debug(f"{name}: {wind_speed_m_s} m/s → {output_mw:.2f} MW ({capacity_factor*100:.1f}%)")
         
-    def set_battery_power(self, name: str, power_mw: float) -> None:
-        """
-        Set the battery's active power setpoint (positive values discharge the battery, negative values charge it).
-        
-        Args:
-            name: Battery name
-            power_mw: Power in MW (positive = discharge, negative = charge)
-            
-        Raises:
-            ValueError: If DER not found or wrong type
-            RuntimeError: If network index is invalid
-        """
-        with self._lock:
-            try:
-                spec = self._get_spec(name)
-            except KeyError:
-                raise ValueError(f"DER '{name}' not found")
-                
-            if spec.der_type != DERType.BESS:
-                raise ValueError(f"{name} is not a battery system (type: {spec.der_type.value})")
-            
-            # Clamp to charge/discharge limits
-            original_power = power_mw
-            power_mw = np.clip(power_mw, -spec.charge_rate_mw, spec.discharge_rate_mw)
-            if original_power != power_mw:
-                logger.warning(f"{name}: Power {original_power} MW clamped to {power_mw} MW")
-            
-            # Check SOC limits
-            if name in self._battery_states:
-                batt_state = self._battery_states[name]
-                if power_mw > 0 and batt_state.soc <= 0.05:
-                    logger.warning(f"{name}: SOC too low ({batt_state.soc:.1%}) for discharge")
-                    power_mw = 0
-                elif power_mw < 0 and batt_state.soc >= 0.95:
-                    logger.warning(f"{name}: SOC too high ({batt_state.soc:.1%}) for charge")
-                    power_mw = 0
-            
-            idx = self.der_indices.get(name)
-            if idx is None:
-                raise RuntimeError(f"DER '{name}' has no registered network index")
-            if idx not in self.net.storage.index:
-                raise RuntimeError(f"DER '{name}' index {idx} no longer valid in network")
-                
-            self.net.storage.at[idx, 'p_mw'] = power_mw
-            
-            logger.debug(f"{name}: {'Discharging' if power_mw > 0 else 'Charging'} at {abs(power_mw):.2f} MW")
+    # NOTE: set_battery_power() removed — battery SOC management stripped per multi-agent redesign
         
     def set_ev_charging_load(self, name: str, utilization: float, smart_override: bool = False) -> None:
         """
@@ -762,19 +597,7 @@ class DERManager:
             spec = self._get_spec(name)
             idx = self.der_indices[name]
         
-            if spec.der_type == DERType.BESS:
-                storage = self.net.storage.loc[idx]
-                return DERState(
-                    name=name,
-                    der_type=spec.der_type,
-                    bus=spec.bus,
-                    current_output_mw=storage.p_mw,
-                    capacity_mw=spec.capacity_mw,
-                    availability=1.0,
-                    soc=self.battery_soc.get(name, 0.5),
-                    charging=storage.p_mw < 0
-                )
-            elif spec.der_type == DERType.EV_CHARGING:
+            if spec.der_type == DERType.EV_CHARGING:
                 load = self.net.load.loc[idx]
                 utilization = load.p_mw / spec.capacity_mw if spec.capacity_mw > 0 else 0
                 return DERState(
@@ -847,64 +670,28 @@ class DERManager:
                 return s
         raise ValueError(f"DER not found: {name}")
         
-    def update_battery_soc(self, timestep_hours: float = 1.0) -> None:
-        """
-        Advance battery states of charge (SOC) for all registered BESS units
-        using enhanced BatteryState tracking with round-trip efficiency.
-        
-        FIX U03: Uses BatteryState.update_soc() which applies round-trip efficiency.
-        FIX TS02: Thread-safe via internal lock.
-        
-        Parameters:
-            timestep_hours (float): Duration over which power is integrated, in hours (default 1.0).
-        """
-        with self._lock:  # FIX TS02: Add thread safety
-            for name, idx in self.der_indices.items():
-                spec = self._get_spec(name)
-                if spec.der_type == DERType.BESS:
-                    power_mw = self.net.storage.at[idx, 'p_mw']
-                    energy_mwh = power_mw * timestep_hours
-                    
-                    # FIX U03: Use BatteryState for efficiency-aware SOC update
-                    if name in self._battery_states:
-                        self._battery_states[name].update_soc(energy_mwh)
-                        new_soc = self._battery_states[name].soc
-                    else:
-                        # Fallback: apply default 92% efficiency
-                        eta = 0.92
-                        if energy_mwh < 0:  # Charging
-                            energy_mwh *= eta
-                        delta_soc = -energy_mwh / spec.energy_capacity_mwh
-                        new_soc = np.clip(self.battery_soc.get(name, 0.5) + delta_soc, 0, 1)
-                    
-                    self.battery_soc[name] = new_soc
-                    
-                    # Update pandapower storage SOC
-                    self.net.storage.at[idx, 'soc_percent'] = new_soc * 100
+    # NOTE: update_battery_soc() removed — battery SOC management stripped per multi-agent redesign
     
     def get_total_generation(self) -> float:
         """
         Return the net active generation from all DERs in MW.
         
         Returns:
-            float: Net generation in MW; positive values indicate net generation. Battery discharge is counted as generation (discharging storage p_mw increases the returned total).
+            float: Net generation in MW from solar and wind DERs.
         """
         total = 0.0
         for name, idx in self.der_indices.items():
             spec = self._get_spec(name)
-            if spec.der_type == DERType.BESS:
-                # Battery: negative power = discharge = generation
-                total += -self.net.storage.at[idx, 'p_mw']
-            else:
-                # Solar/Wind: always generation
-                total += self.net.sgen.at[idx, 'p_mw']
+            if spec.der_type in (DERType.SOLAR_PV, DERType.WIND):
+                if idx in self.net.sgen.index:
+                    total += self.net.sgen.at[idx, 'p_mw']
         return total
     
     def get_status(self) -> Dict[str, Dict[str, float]]:
         """
         Return aggregated status metrics for all distributed energy resources grouped by type.
         
-        The returned dictionary contains per-type summaries with capacity, current output/power, and unit counts; battery entries include average state of charge, and demand response entries include available and currently curtailed MW.
+        The returned dictionary contains per-type summaries with capacity, current output/power, and unit counts; demand response entries include available and currently curtailed MW.
         
         Returns:
             dict: Mapping of DER type to metrics:
@@ -914,10 +701,6 @@ class DERManager:
                 - "wind": {"total_capacity_mw": total installed wind capacity in MW,
                            "current_output_mw": sum of current wind output in MW,
                            "unit_count": number of wind units}
-                - "battery": {"capacity_mwh": total battery energy capacity in MWh,
-                              "current_soc_pct": average state of charge across batteries in percent,
-                              "power_mw": sum of battery active power (positive = discharge) in MW,
-                              "unit_count": number of battery units}
                 - "ev_charger": {"max_power_mw": aggregated maximum EV charger power in MW,
                                  "current_power_mw": sum of current EV charging load in MW,
                                  "unit_count": number of EV charging units}
@@ -928,7 +711,6 @@ class DERManager:
         status = {
             "solar": {"total_capacity_mw": 0.0, "current_output_mw": 0.0, "unit_count": 0},
             "wind": {"total_capacity_mw": 0.0, "current_output_mw": 0.0, "unit_count": 0},
-            "battery": {"capacity_mwh": 0.0, "current_soc_pct": 0.0, "power_mw": 0.0, "unit_count": 0},
             "ev_charger": {"max_power_mw": 0.0, "current_power_mw": 0.0, "unit_count": 0},
             "demand_response": {"available_mw": 0.0, "curtailed_mw": 0.0, "unit_count": 0}
         }
@@ -949,12 +731,6 @@ class DERManager:
                 status["wind"]["current_output_mw"] += self.net.sgen.at[idx, 'p_mw']
                 status["wind"]["unit_count"] += 1
                 
-            elif spec.der_type == DERType.BESS:
-                status["battery"]["capacity_mwh"] += spec.energy_capacity_mwh or (spec.capacity_mw * 4)
-                status["battery"]["current_soc_pct"] += self.battery_soc.get(name, 0.5) * 100
-                status["battery"]["power_mw"] += self.net.storage.at[idx, 'p_mw']
-                status["battery"]["unit_count"] += 1
-                
             elif spec.der_type == DERType.EV_CHARGING:
                 # EV: max power is capacity or num_chargers * charger_power
                 max_power = spec.capacity_mw
@@ -972,10 +748,6 @@ class DERManager:
                 current = self.net.load.at[idx, 'p_mw']
                 status["demand_response"]["curtailed_mw"] += max(0, baseline - current)
                 status["demand_response"]["unit_count"] += 1
-        
-        # Average SOC across batteries if multiple
-        if status["battery"]["unit_count"] > 0:
-            status["battery"]["current_soc_pct"] /= status["battery"]["unit_count"]
             
         return status
     

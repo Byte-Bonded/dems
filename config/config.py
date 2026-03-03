@@ -5,7 +5,7 @@ Centralized configuration with environment variable support
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 
 try:
@@ -50,14 +50,39 @@ class GridConfig:
 
 
 @dataclass
-class RLConfig:
-    """Reinforcement learning configuration"""
-    algorithm: str = field(default_factory=lambda: os.getenv("RL_ALGORITHM", "PPO"))
-    learning_rate: float = field(default_factory=lambda: _get_env_float("LEARNING_RATE", 0.0003))
-    batch_size: int = field(default_factory=lambda: _get_env_int("BATCH_SIZE", 64))
-    n_steps: int = field(default_factory=lambda: _get_env_int("N_STEPS", 2048))
+class MultiAgentRLConfig:
+    """Hierarchical multi-agent PPO configuration"""
+    algorithm: str = "PPO"
+    # Central coordinating agent
+    central_learning_rate: float = field(default_factory=lambda: _get_env_float("CENTRAL_LR", 3e-4))
+    central_net_arch: List[int] = field(default_factory=lambda: [256, 256])
+    central_n_steps: int = field(default_factory=lambda: _get_env_int("CENTRAL_N_STEPS", 2048))
+    central_batch_size: int = field(default_factory=lambda: _get_env_int("CENTRAL_BATCH_SIZE", 64))
+    # Microgrid-level agents (×3)
+    mg_learning_rate: float = field(default_factory=lambda: _get_env_float("MG_LR", 3e-4))
+    mg_net_arch: List[int] = field(default_factory=lambda: [256, 256])
+    mg_n_steps: int = field(default_factory=lambda: _get_env_int("MG_N_STEPS", 2048))
+    mg_batch_size: int = field(default_factory=lambda: _get_env_int("MG_BATCH_SIZE", 64))
+    # Sub-agents (inverter, renewable, load × 3)
+    sub_learning_rate: float = field(default_factory=lambda: _get_env_float("SUB_LR", 3e-4))
+    sub_net_arch: List[int] = field(default_factory=lambda: [128, 128])
+    sub_n_steps: int = field(default_factory=lambda: _get_env_int("SUB_N_STEPS", 1024))
+    sub_batch_size: int = field(default_factory=lambda: _get_env_int("SUB_BATCH_SIZE", 32))
+    # Common
     gamma: float = field(default_factory=lambda: _get_env_float("GAMMA", 0.99))
-    tensorboard_log: Optional[str] = field(default_factory=lambda: os.getenv("TENSORBOARD_LOG"))
+    gae_lambda: float = field(default_factory=lambda: _get_env_float("GAE_LAMBDA", 0.95))
+    clip_range: float = 0.2
+    ent_coef: float = 0.01
+    vf_coef: float = 0.5
+    max_grad_norm: float = 0.5
+    # Training schedule
+    total_timesteps: int = field(default_factory=lambda: _get_env_int("TOTAL_TIMESTEPS", 1_000_000))
+    eval_freq: int = field(default_factory=lambda: _get_env_int("EVAL_FREQ", 10_000))
+    n_eval_episodes: int = 5
+    # CTDE
+    ctde_enabled: bool = True
+    shared_critic: bool = True
+    tensorboard_log: Optional[str] = field(default_factory=lambda: os.getenv("TENSORBOARD_LOG", "logs/tb"))
 
 
 @dataclass
@@ -86,7 +111,7 @@ class Config:
     """
     api: APIConfig = field(default_factory=APIConfig)
     grid: GridConfig = field(default_factory=GridConfig)
-    rl: RLConfig = field(default_factory=RLConfig)
+    rl: MultiAgentRLConfig = field(default_factory=MultiAgentRLConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     

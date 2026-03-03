@@ -1,31 +1,22 @@
 """
-Grid Simulation Orchestrator — Single Entry Point for RL Agent Interaction
+Physics Engine — Simulation backbone for the DEMS multi-agent system
 
-This module provides the sole interface between the RL agent and the IEEE 39-bus
-tri-area dynamic power system simulation.  Every interaction (observation, action,
-reward, reset) passes through the ``GridOrchestrator`` class so that the agent
-never needs to call supergrid, power_flow, der, or dynamics modules directly.
+This module provides the physical simulation layer that all RL agents interact
+with through the MultiAgentStepCoordinator. It owns the SuperGrid, power flow,
+dynamics, DER management, and stochastic profile generation.
+
+The old single-agent RL interface (ObservationBuilder, RewardCalculator,
+ActionMapper, GridOrchestrator) has been replaced by the hierarchical
+multi-agent system in src/agent/.
 
 IEEE Standard Compliance
 ========================
 * **IEEE Std 39-bus** (New England Test System) × 3 areas = 117-bus SuperGrid
-* **IEEE Std 421.5** — Type 1 Excitation System (IEEET1) on every generator
+* **IEEE Std 421.5** — Type 1 Excitation System (IEEET1)
 * **IEEE/NERC TGOV1** — Governor-turbine primary frequency response
-* **IEEE Std 421.5 PSS2A** — Power System Stabilizer on large units (≥600 MVA)
-* **IEGC (Indian Grid Code)** — 50 Hz, 49.5–50.5 Hz operating band, 0.95–1.05 pu voltage
+* **IEEE Std 421.5 PSS2A** — Power System Stabilizer
+* **IEGC (Indian Grid Code)** — 50 Hz, 49.5–50.5 Hz, 0.95–1.05 pu voltage
 * **IEC 61400-27** — Wind turbine power-curve model
-
-Dynamic Simulation Pipeline (per step)
-=======================================
-1. Apply RL agent actions (generator setpoints, DER dispatch, load control)
-2. Solve AC power flow (Newton-Raphson, pandapower)
-3. Step electromechanical dynamics (swing eqn, AVR, governor, PSS)
-4. Update AGC secondary frequency control
-5. Update DER states (battery SOC, irradiance, wind)
-6. Update frequency-/voltage-dependent loads
-7. Check protection relays
-8. Compute IEEE-compliant observation & reward
-9. Check termination criteria
 """
 
 from __future__ import annotations
@@ -85,16 +76,6 @@ class ScenarioConfig:
     f_max_hz: float = 50.5
     v_min_pu: float = 0.95
     v_max_pu: float = 1.05
-
-
-class ActionType(Enum):
-    """Enumeration of RL action components."""
-    GEN_SETPOINT = "gen_setpoint"
-    BATTERY_POWER = "battery_power"
-    SOLAR_CURTAIL = "solar_curtail"
-    WIND_CURTAIL = "wind_curtail"
-    EV_UTILIZATION = "ev_utilization"
-    DEMAND_RESPONSE = "demand_response"
 
 
 # ======================== LOAD / RENEWABLE PROFILES ======================== #
@@ -197,394 +178,28 @@ class StochasticProfileGenerator:
         return np.clip(base + noise, 0.5, 1.5)
 
 
-# ======================== OBSERVATION BUILDER ======================== #
+# ======================== PHYSICS ENGINE ======================== #
 
-class ObservationBuilder:
+class PhysicsEngine:
     """
-    Constructs a flat, normalised float32 vector from the raw grid state.
+    The simulation backbone for the hierarchical multi-agent system.
 
-    Observation vector layout (per area × 3 + global):
-    ──────────────────────────────────────────────────
-    Per area (9 values × 3 areas = 27):
-        0  total_generation_mw / 10000       (normalised)
-        1  total_load_mw / 10000
-        2  net_interchange_mw / 1000
-        3  avg_voltage_pu
-        4  min_voltage_pu
-        5  max_voltage_pu
-        6  num_voltage_violations / 39
-        7  total_solar_mw / 100
-        8  total_wind_mw / 100
-
-    Global (15 values):
-        27 system_frequency_hz / 50
-        28 frequency_deviation_hz (clipped ±1)
-        29 total_generation_mw / 30000
-        30 total_load_mw / 30000
-        31 total_losses_mw / 1000
-        32 has_voltage_violations (0/1)
-        33 has_thermal_violations (0/1)
-        34 avg_battery_soc
-        35 total_der_generation_mw / 1000
-        36 hour_of_day / 24
-        37 solar_irradiance / 1000
-        38 wind_speed / 25
-        39 load_scale_factor
-        40 step / episode_length
-        41 reward_last_step
-
-    Total = 42
-
-    All values clipped to [−2, 2] to avoid exploding gradients.
-    """
-
-    OBS_DIM = 42
-
-    def __init__(self, cfg: ScenarioConfig, sg: Optional['SuperGrid'] = None):
-        self.cfg = cfg
-        self.sg = sg
-
-    def build(
-        self,
-        grid_state: Dict,
-        der_status: Dict,
-        frequency_hz: float,
-        profiles: StochasticProfileGenerator,
-        step: int,
-        last_reward: float,
-    ) -> np.ndarray:
-        obs = np.zeros(self.OBS_DIM, dtype=np.float32)
-
-        # Per-area features
-        for i, area_key in enumerate(["A", "B", "C"]):
-            a = grid_state["areas"].get(area_key, {})
-            base = i * 9
-            obs[base + 0] = a.get("total_generation_mw", 0) / 10000.0
-            obs[base + 1] = a.get("total_load_mw", 0) / 10000.0
-            obs[base + 2] = a.get("net_interchange_mw", 0) / 1000.0
-            obs[base + 3] = a.get("avg_voltage_pu", 1.0)
-            obs[base + 4] = a.get("min_voltage_pu", 1.0)
-            obs[base + 5] = a.get("max_voltage_pu", 1.0)
-            # Count voltage violations in area
-            v_min = a.get("min_voltage_pu", 1.0)
-            v_max = a.get("max_voltage_pu", 1.0)
-            violations = int(v_min < self.cfg.v_min_pu) + int(v_max > self.cfg.v_max_pu)
-            obs[base + 6] = violations / 2.0
-            # FIX C04: Per-area DER output (instead of total/3)
-            area_solar = 0.0
-            area_wind = 0.0
-            if self.sg is not None and self.sg.der_manager is not None:
-                for spec in self.sg.der_manager.der_specs:
-                    if spec.area_id == area_key:
-                        idx_der = self.sg.der_manager.der_indices.get(spec.name)
-                        if idx_der is not None:
-                            if spec.der_type == DERType.SOLAR_PV and idx_der in self.sg.net.sgen.index:
-                                area_solar += self.sg.net.sgen.at[idx_der, 'p_mw']
-                            elif spec.der_type == DERType.WIND and idx_der in self.sg.net.sgen.index:
-                                area_wind += self.sg.net.sgen.at[idx_der, 'p_mw']
-            obs[base + 7] = area_solar / 100.0
-            obs[base + 8] = area_wind / 100.0
-
-        # Global features
-        gm = grid_state.get("global_metrics", {})
-        obs[27] = frequency_hz / 50.0
-        obs[28] = np.clip(frequency_hz - 50.0, -1, 1)
-        obs[29] = gm.get("total_generation_mw", 0) / 30000.0
-        obs[30] = gm.get("total_load_mw", 0) / 30000.0
-        obs[31] = gm.get("total_losses_mw", 0) / 1000.0
-        obs[32] = float(gm.get("has_voltage_violations", False))
-        obs[33] = float(gm.get("has_thermal_violations", False))
-        obs[34] = der_status.get("battery", {}).get("current_soc_pct", 50) / 100.0
-        obs[35] = (
-            der_status.get("solar", {}).get("current_output_mw", 0) +
-            der_status.get("wind", {}).get("current_output_mw", 0)
-        ) / 1000.0
-        obs[36] = profiles.hour_of_day(step) / 24.0
-        obs[37] = profiles.solar_irradiance(step) / 1000.0
-        obs[38] = profiles.wind_speed(step) / 25.0
-        obs[39] = profiles.load_scale_factor(step)
-        obs[40] = step / max(self.cfg.episode_length_steps, 1)
-        obs[41] = np.clip(last_reward, -5, 5) / 5.0
-
-        return np.clip(obs, -2.0, 2.0)
-
-
-# ======================== REWARD CALCULATOR ======================== #
-
-class RewardCalculator:
-    """
-    Computes a multi-objective scalar reward that incentivises:
-    * Frequency regulation (IEGC 49.5–50.5 Hz)
-    * Voltage profile (IEEE 0.95–1.05 pu)
-    * Economic generation cost minimisation
-    * Loss minimisation
-    * Smooth control actions
-    * Zero protection trips
-
-    All sub-rewards are in [−1, 1] and weighted by ScenarioConfig weights.
-    """
-
-    def __init__(self, cfg: ScenarioConfig):
-        self.cfg = cfg
-        self._prev_action: Optional[np.ndarray] = None
-
-    def reset(self) -> None:
-        self._prev_action = None
-
-    def compute(
-        self,
-        pf_result: PowerFlowResult,
-        frequency_hz: float,
-        protection_trips: int,
-        action: np.ndarray,
-    ) -> Tuple[float, Dict[str, float]]:
-        """Return (total_reward, breakdown_dict)."""
-        c = self.cfg
-
-        # 1. Frequency reward — penalise quadratically from nominal
-        f_dev = abs(frequency_hz - c.f_nominal_hz)
-        f_max_dev = (c.f_max_hz - c.f_min_hz) / 2.0   # 0.5 Hz
-        r_freq = 1.0 - min((f_dev / f_max_dev) ** 2, 1.0)
-
-        # 2. Voltage reward — fraction of buses within limits
-        if pf_result.converged:
-            total_buses = 117  # tri-area
-            v_ok = total_buses - pf_result.num_voltage_violations
-            r_volt = v_ok / total_buses
-        else:
-            r_volt = -1.0
-
-        # 3. Economic reward — incentivise lower generation cost (losses proxy)
-        if pf_result.converged:
-            loss_pct = pf_result.total_losses_mw / max(pf_result.total_generation_mw, 1) * 100
-            r_econ = 1.0 - min(loss_pct / 3.0, 1.0)   # 0% loss → 1, ≥3% → 0
-        else:
-            r_econ = -1.0
-
-        # 4. Loss reward — absolute MW losses
-        if pf_result.converged:
-            r_loss = 1.0 - min(pf_result.total_losses_mw / 500.0, 1.0)
-        else:
-            r_loss = -1.0
-
-        # 5. Action smoothness — penalise large Δaction between steps
-        if self._prev_action is not None and len(action) == len(self._prev_action):
-            delta = np.mean(np.abs(action - self._prev_action))
-            r_smooth = 1.0 - min(delta / 0.3, 1.0)
-        else:
-            r_smooth = 0.5   # Neutral on first step
-        self._prev_action = action.copy()
-
-        # 6. Protection trip penalty
-        r_prot = 1.0 if protection_trips == 0 else -1.0
-
-        # Weighted sum
-        total = (
-            c.w_frequency * r_freq
-            + c.w_voltage * r_volt
-            + c.w_economics * r_econ
-            + c.w_losses * r_loss
-            + c.w_action_smoothness * r_smooth
-            + c.w_protection * r_prot
-        )
-
-        breakdown = {
-            "r_frequency": r_freq,
-            "r_voltage": r_volt,
-            "r_economics": r_econ,
-            "r_losses": r_loss,
-            "r_smoothness": r_smooth,
-            "r_protection": r_prot,
-            "total": total,
-        }
-        return float(total), breakdown
-
-
-# ======================== ACTION MAPPER ======================== #
-
-class ActionMapper:
-    """
-    Maps a flat action array from the RL agent to concrete grid control commands.
-
-    Action vector layout
-    ────────────────────
-    The RL agent outputs a 1-D float32 array in [0, 1].  This mapper linearly
-    rescales each slice to the appropriate physical range and applies it to
-    the SuperGrid / DERManager.
-
-    Indices (default 117-bus, 18 DERs):
-        0..26  : Generator MW setpoints (27 generators, fraction of Pmax)
-        27..29 : Battery MW command   (3 batteries, −1 → full charge, +1 → full discharge)
-        30..32 : Solar curtailment    (3 solar farms, 0 → no curtail, 1 → full curtail)
-        33..35 : Wind curtailment     (3 wind farms, 0 → no curtail, 1 → full curtail)
-        36..40 : EV utilisation       (5 stations, 0 → off, 1 → full)
-        41..46 : Demand response      (6 programs, 0 → none, 1 → max curtail)
-
-    Total action dim = 47
-    """
-
-    def __init__(self, sg: SuperGrid):
-        self.sg = sg
-        self._gen_indices: List[int] = []
-        self._gen_pmax: List[float] = []
-        self._gen_pmin: List[float] = []
-        self._battery_names: List[str] = []
-        self._battery_max_mw: List[float] = []
-        self._solar_names: List[str] = []
-        self._wind_names: List[str] = []
-        self._ev_names: List[str] = []
-        self._dr_names: List[str] = []
-
-    @property
-    def action_dim(self) -> int:
-        return (
-            len(self._gen_indices)
-            + len(self._battery_names)
-            + len(self._solar_names)
-            + len(self._wind_names)
-            + len(self._ev_names)
-            + len(self._dr_names)
-        )
-
-    def configure(self) -> None:
-        """Discover controllable elements from the live grid."""
-        net = self.sg.net
-
-        # Generators (sorted by index for deterministic ordering)
-        for idx in sorted(net.gen.index):
-            self._gen_indices.append(int(idx))
-            self._gen_pmax.append(float(net.gen.at[idx, "max_p_mw"]))
-            self._gen_pmin.append(float(net.gen.at[idx, "min_p_mw"]))
-
-        # DER elements (only if DER manager exists)
-        dm = self.sg.der_manager
-        if dm is None:
-            return
-
-        for spec in dm.der_specs:
-            if spec.der_type == DERType.BESS:
-                self._battery_names.append(spec.name)
-                self._battery_max_mw.append(spec.capacity_mw)
-            elif spec.der_type == DERType.SOLAR_PV:
-                self._solar_names.append(spec.name)
-            elif spec.der_type == DERType.WIND:
-                self._wind_names.append(spec.name)
-            elif spec.der_type == DERType.EV_CHARGING:
-                self._ev_names.append(spec.name)
-            elif spec.der_type == DERType.DEMAND_RESPONSE:
-                self._dr_names.append(spec.name)
-
-    def apply(self, action: np.ndarray, profiles: StochasticProfileGenerator, step: int) -> Dict[str, Any]:
-        """
-        Translate the flat RL action vector into physical grid commands.
-
-        Returns a dict of what was applied, useful for logging / debugging.
-        """
-        applied: Dict[str, Any] = {}
-        idx = 0
-        net = self.sg.net
-        dm = self.sg.der_manager
-
-        # --- Generator setpoints ---
-        n_gen = len(self._gen_indices)
-        gen_actions = action[idx: idx + n_gen]
-        idx += n_gen
-        for i, gi in enumerate(self._gen_indices):
-            frac = float(np.clip(gen_actions[i] if i < len(gen_actions) else 0.5, 0, 1))
-            p_mw = self._gen_pmin[i] + frac * (self._gen_pmax[i] - self._gen_pmin[i])
-            self.sg.set_generator_setpoint(gi, p_mw)
-        applied["gen_setpoints"] = gen_actions.tolist() if n_gen else []
-
-        if dm is None:
-            return applied
-
-        # --- Battery dispatch ---
-        n_batt = len(self._battery_names)
-        batt_actions = action[idx: idx + n_batt]
-        idx += n_batt
-        for i, name in enumerate(self._battery_names):
-            frac = float(np.clip(batt_actions[i] if i < len(batt_actions) else 0.5, 0, 1))
-            p_mw = (frac - 0.5) * 2.0 * self._battery_max_mw[i]  # −max..+max
-            dm.set_battery_power(name, p_mw)
-        applied["battery_commands"] = batt_actions.tolist() if n_batt else []
-
-        # --- Solar curtailment ---
-        n_solar = len(self._solar_names)
-        solar_actions = action[idx: idx + n_solar]
-        idx += n_solar
-        irradiance = profiles.solar_irradiance(step)
-        for i, name in enumerate(self._solar_names):
-            curtail = float(np.clip(solar_actions[i] if i < len(solar_actions) else 0, 0, 1))
-            # FIX BUG-10: Curtail inverter power output, not irradiance input
-            dm.set_solar_output(name, irradiance)  # full irradiance first
-            idx_sgen = dm.der_indices[name]
-            uncurtailed_mw = dm.net.sgen.at[idx_sgen, 'p_mw']
-            dm.net.sgen.at[idx_sgen, 'p_mw'] = uncurtailed_mw * (1.0 - curtail)
-        applied["solar_curtail"] = solar_actions.tolist() if n_solar else []
-
-        # --- Wind curtailment (FIX C02: curtail power output, not wind speed) ---
-        n_wind = len(self._wind_names)
-        wind_actions = action[idx: idx + n_wind]
-        idx += n_wind
-        ws = profiles.wind_speed(step)
-        for i, name in enumerate(self._wind_names):
-            curtail = float(np.clip(wind_actions[i] if i < len(wind_actions) else 0, 0, 1))
-            # First set wind at full speed to compute uncurtailed power
-            dm.set_wind_output(name, ws)
-            # Then read the output and curtail the power directly
-            spec = dm._get_spec(name)
-            wind_idx = dm.der_indices[name]
-            uncurtailed_mw = dm.net.sgen.at[wind_idx, 'p_mw']
-            dm.net.sgen.at[wind_idx, 'p_mw'] = uncurtailed_mw * (1.0 - curtail)
-        applied["wind_curtail"] = wind_actions.tolist() if n_wind else []
-
-        # --- EV utilisation ---
-        n_ev = len(self._ev_names)
-        ev_actions = action[idx: idx + n_ev]
-        idx += n_ev
-        for i, name in enumerate(self._ev_names):
-            util = float(np.clip(ev_actions[i] if i < len(ev_actions) else 0.3, 0, 1))
-            dm.set_ev_charging_load(name, util)
-        applied["ev_util"] = ev_actions.tolist() if n_ev else []
-
-        # --- Demand response ---
-        n_dr = len(self._dr_names)
-        dr_actions = action[idx: idx + n_dr]
-        idx += n_dr
-        for i, name in enumerate(self._dr_names):
-            curt = float(np.clip(dr_actions[i] if i < len(dr_actions) else 0, 0, 1))
-            dm.set_demand_response_curtailment(name, curt)
-        applied["dr_curtail"] = dr_actions.tolist() if n_dr else []
-
-        return applied
-
-
-# ======================== GRID ORCHESTRATOR ======================== #
-
-class GridOrchestrator:
-    """
-    **The single entry point for the RL agent to interact with the grid.**
-
-    Lifecycle::
-
-        orch = GridOrchestrator()          # builds 117-bus grid + dynamics + DER
-        obs   = orch.reset()               # new episode with fresh stochastic profiles
-        while not done:
-            obs, reward, done, info = orch.step(action)
-        summary = orch.episode_summary()
-
-    The orchestrator owns every layer of the simulation:
-
+    Owns every physical layer:
     * ``SuperGrid``         — topology, power flow, generators
-    * ``DERManager``        — solar, wind, battery, EV, DR
+    * ``DERManager``        — solar, wind, EV, DR
     * ``DynamicsCoordinator`` — swing eqn, AVR, governor, PSS, AGC
-    * ``StochasticProfileGenerator`` — load, solar, wind (Ornstein-Uhlenbeck)
+    * ``StochasticProfileGenerator`` — load, solar, wind
     * ``PowerFlowRunner``   — Newton-Raphson AC power flow
-    * ``RewardCalculator``  — multi-objective IEEE-compliant reward
-    * ``ObservationBuilder`` — normalised 42-dim observation vector
-    * ``ActionMapper``      — maps RL actions → physical commands
 
-    The agent never touches any submodule directly.
+    Multi-agent environments call PhysicsEngine methods to:
+    - Update stochastic profiles (renewables, load)
+    - Apply control actions (gen setpoints, DER dispatch)
+    - Solve power flow
+    - Step dynamics
+    - Read area/global states
+
+    The PhysicsEngine does NOT compute observations or rewards —
+    that is handled by the agent layer.
     """
 
     def __init__(
@@ -598,7 +213,7 @@ class GridOrchestrator:
         self.rng = np.random.default_rng(seed)
 
         # Build grid
-        logger.info("GridOrchestrator: building 117-bus SuperGrid …")
+        logger.info("PhysicsEngine: building 117-bus SuperGrid …")
         self.sg = SuperGrid(config=self.grid_cfg)
 
         # Initialize subsystems
@@ -611,19 +226,10 @@ class GridOrchestrator:
         # Profiles
         self.profiles = StochasticProfileGenerator(self.cfg, self.rng)
 
-        # Observation / reward / action
-        self.obs_builder = ObservationBuilder(self.cfg, self.sg)
-        self.reward_calc = RewardCalculator(self.cfg)
-        self.action_mapper = ActionMapper(self.sg)
-        self.action_mapper.configure()
-
         # Episode bookkeeping
         self._step_count: int = 0
         self._episode_count: int = 0
-        self._cumulative_reward: float = 0.0
-        self._last_reward: float = 0.0
         self._last_pf: Optional[PowerFlowResult] = None
-        self._history: List[Dict] = []
         self._done: bool = False
         # FIX C03: Store original load values to avoid float drift
         self._base_load_p: Optional[Dict[int, float]] = None
@@ -633,20 +239,11 @@ class GridOrchestrator:
         self._solve_power_flow()
 
         logger.info(
-            f"GridOrchestrator ready: {self.observation_dim}-D obs, "
-            f"{self.action_dim}-D action, "
+            f"PhysicsEngine ready: "
             f"{self.cfg.episode_length_steps} steps/episode"
         )
 
     # ─── public properties ─────────────────────────────────────────
-
-    @property
-    def observation_dim(self) -> int:
-        return ObservationBuilder.OBS_DIM
-
-    @property
-    def action_dim(self) -> int:
-        return self.action_mapper.action_dim
 
     @property
     def system_frequency_hz(self) -> float:
@@ -660,22 +257,18 @@ class GridOrchestrator:
     def is_done(self) -> bool:
         return self._done
 
+    @property
+    def last_pf_result(self) -> Optional[PowerFlowResult]:
+        return self._last_pf
+
     # ─── reset ─────────────────────────────────────────────────────
 
-    def reset(self, seed: Optional[int] = None) -> np.ndarray:
+    def reset(self, seed: Optional[int] = None) -> Dict[str, Any]:
         """
         Reset the simulation to a new episode.
 
-        * Rebuilds the grid to IEEE 39-bus base case
-        * Generates fresh stochastic profiles
-        * Runs initial power flow
-        * Returns the first observation
-
-        Parameters:
-            seed: optional RNG seed for reproducibility.
-
         Returns:
-            obs: np.ndarray of shape (42,).
+            info dict with initial grid state.
         """
         if seed is not None:
             self.rng = np.random.default_rng(seed)
@@ -686,15 +279,8 @@ class GridOrchestrator:
         self.der_manager = self.sg.initialize_der()
         self.dynamics = self.sg.initialize_dynamics()
 
-        # Re-configure action mapper on fresh grid
-        self.action_mapper = ActionMapper(self.sg)
-        self.action_mapper.configure()
-
         # Fresh profiles
         self.profiles.reset()
-
-        # Reset reward
-        self.reward_calc.reset()
 
         # Apply initial conditions from profiles (step 0)
         self._apply_profile_conditions(step=0)
@@ -709,65 +295,51 @@ class GridOrchestrator:
         # Bookkeeping
         self._step_count = 0
         self._episode_count += 1
-        self._cumulative_reward = 0.0
-        self._last_reward = 0.0
-        self._history = []
         self._done = False
 
         # FIX C03: Snapshot base loads after reset
         self._base_load_p = {int(i): float(self.sg.net.load.at[i, 'p_mw']) for i in self.sg.net.load.index}
         self._base_load_q = {int(i): float(self.sg.net.load.at[i, 'q_mvar']) for i in self.sg.net.load.index}
 
-        return self._build_observation()
+        return {
+            "step": 0,
+            "pf_converged": self._last_pf.converged if self._last_pf else False,
+            "frequency_hz": self.system_frequency_hz,
+        }
 
-    # ─── step ──────────────────────────────────────────────────────
+    # ─── step (called by MultiAgentStepCoordinator) ────────────────
 
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
+    def step(self) -> Dict[str, Any]:
         """
-        Execute one control step of the simulation.
+        Execute one control step of the physics simulation.
+
+        This method assumes that all agent actions have already been
+        applied to the grid (gen setpoints, DER dispatch, load adjustments)
+        by the MultiAgentStepCoordinator before calling this.
 
         Pipeline per step:
-        1.  Apply RL actions to generators, DER, loads
-        2.  Apply stochastic load profile
-        3.  Solve AC power flow (Newton-Raphson)
-        4.  Step electromechanical dynamics (multiple sub-steps)
-        5.  Update battery SOC
-        6.  Compute reward
-        7.  Build observation
-        8.  Check termination
-
-        Parameters:
-            action: np.ndarray of shape (action_dim,) with values in [0, 1].
+        1. Apply stochastic load profile
+        2. Solve AC power flow
+        3. Step electromechanical dynamics
+        4. Count protection trips
+        5. Return step info
 
         Returns:
-            obs:    np.ndarray (42,)
-            reward: float
-            done:   bool
-            info:   dict with diagnostics
+            info dict with step diagnostics.
         """
         if self._done:
             raise RuntimeError("Episode is done. Call reset() first.")
 
-        action = np.asarray(action, dtype=np.float32).flatten()
-        if len(action) < self.action_dim:
-            action = np.pad(action, (0, self.action_dim - len(action)), constant_values=0.5)
-        action = np.clip(action, 0.0, 1.0)
-
         self._step_count += 1
         step = self._step_count
 
-        # 1. Apply actions
-        applied = self.action_mapper.apply(action, self.profiles, step)
-
-        # 2. Apply load profile from BASE values (FIX C03/N04: no float drift)
-        #    FIX NEW-BUG-01: Skip DER-managed loads (EV, DR) so RL agent
-        #    actions from step 1 are not overwritten by profile scaling.
+        # 1. Apply load profile from BASE values (FIX C03/N04: no float drift)
         scale = self.profiles.load_scale_factor(step)
         der_load_indices = self._get_der_load_indices()
         if self._base_load_p is not None:
             for load_idx in self.sg.net.load.index:
                 if int(load_idx) in der_load_indices:
-                    continue  # Preserve RL-controlled DER load
+                    continue
                 i = int(load_idx)
                 base_p = self._base_load_p.get(i, self.sg.net.load.at[load_idx, 'p_mw'])
                 base_q = self._base_load_q.get(i, self.sg.net.load.at[load_idx, 'q_mvar'])
@@ -777,45 +349,28 @@ class GridOrchestrator:
             for area_id in AreaID:
                 self.sg.scale_loads(area_id, scale)
 
-        # 3. FIX LIGHT-LOAD: Adjust reactive resources for current load level
-        #    Enables/disables switchable shunt capacitors based on load fraction
+        # 2. Adjust reactive resources for current load level
         self.sg.prepare_for_load_level(scale)
 
-        # 4. Solve AC power flow
+        # 3. Solve AC power flow
         pf_result = self._solve_power_flow()
 
-        # 5. Step dynamics (multiple sub-steps for accuracy)
+        # 4. Step dynamics (multiple sub-steps for accuracy)
         dyn_result = None
         if pf_result.converged:
             for _ in range(self.cfg.dynamics_substeps):
                 dyn_result = self.sg.step_dynamics(dt=self.cfg.dt_dynamics_s)
 
-        # 6. Update battery SOC
-        if self.der_manager:
-            hours = self.cfg.dt_control_s / 3600.0
-            self.der_manager.update_battery_soc(timestep_hours=hours)
-
-        # 7. Count protection trips
+        # 5. Count protection trips
         trips = 0
         if dyn_result and "protection" in dyn_result:
             trips = sum(1 for s in dyn_result["protection"].values() if s.get("tripped"))
 
-        # 8. Reward
-        reward, reward_breakdown = self.reward_calc.compute(
-            pf_result, self.system_frequency_hz, trips, action
-        )
-        self._last_reward = reward
-        self._cumulative_reward += reward
-
-        # 9. Observation BEFORE restoration (FIX BUG-02: avoid stale loads)
-        obs = self._build_observation()
-
-        # 10. Restore loads to BASE values (FIX C03: exact restore)
-        #    FIX NEW-BUG-01: Only restore non-DER loads; DER loads stay.
+        # 6. Restore loads to BASE values
         if self._base_load_p is not None:
             for load_idx in self.sg.net.load.index:
                 if int(load_idx) in der_load_indices:
-                    continue  # DER loads managed by agent, not restored
+                    continue
                 i = int(load_idx)
                 self.sg.net.load.at[load_idx, 'p_mw'] = self._base_load_p.get(i, 0)
                 self.sg.net.load.at[load_idx, 'q_mvar'] = self._base_load_q.get(i, 0)
@@ -823,10 +378,9 @@ class GridOrchestrator:
             for area_id in AreaID:
                 self.sg.scale_loads(area_id, 1.0 / max(scale, 1e-6))
 
-        # 11. Done?
+        # 7. Done?
         self._done = step >= self.cfg.episode_length_steps
 
-        # Info
         info: Dict[str, Any] = {
             "step": step,
             "pf_converged": pf_result.converged,
@@ -837,21 +391,50 @@ class GridOrchestrator:
             "voltage_violations": pf_result.num_voltage_violations,
             "line_overloads": pf_result.num_line_overloads,
             "protection_trips": trips,
-            "reward_breakdown": reward_breakdown,
-            "cumulative_reward": self._cumulative_reward,
-            "applied_actions": applied,
+            "load_scale": scale,
         }
 
-        self._history.append(info)
-        self._last_pf = pf_result
+        return info
 
-        return obs, reward, self._done, info
+    # ─── action application (called before step) ──────────────────
 
-    # ─── query methods (agent can call these for debug / logging) ──
+    def apply_generator_setpoint(self, gen_idx: int, p_mw: float) -> None:
+        """Set a generator's active power setpoint."""
+        self.sg.set_generator_setpoint(gen_idx, p_mw)
 
-    def get_grid_state(self) -> Dict:
+    def apply_renewable_update(self, step: int) -> None:
+        """Update renewable generation from stochastic profiles."""
+        self._apply_profile_conditions(step)
+
+    def apply_solar_curtailment(self, name: str, curtail_fraction: float) -> None:
+        """Apply solar curtailment (0=no curtail, 1=full curtail)."""
+        dm = self.der_manager
+        if dm is None:
+            return
+        idx = dm.der_indices.get(name)
+        if idx is not None and idx in dm.net.sgen.index:
+            uncurtailed = dm.net.sgen.at[idx, 'p_mw']
+            dm.net.sgen.at[idx, 'p_mw'] = uncurtailed * (1.0 - np.clip(curtail_fraction, 0, 1))
+
+    def apply_wind_curtailment(self, name: str, curtail_fraction: float) -> None:
+        """Apply wind curtailment (0=no curtail, 1=full curtail)."""
+        dm = self.der_manager
+        if dm is None:
+            return
+        idx = dm.der_indices.get(name)
+        if idx is not None and idx in dm.net.sgen.index:
+            uncurtailed = dm.net.sgen.at[idx, 'p_mw']
+            dm.net.sgen.at[idx, 'p_mw'] = uncurtailed * (1.0 - np.clip(curtail_fraction, 0, 1))
+
+    # ─── query methods ─────────────────────────────────────────────
+
+    def get_global_state(self) -> Dict:
         """Full grid state dict (areas, tie-lines, global metrics)."""
         return self.sg.get_global_state()
+
+    def get_area_state(self, area: AreaID) -> Dict:
+        """Per-area state dict."""
+        return self.sg.get_area_state(area)
 
     def get_der_status(self) -> Dict:
         """Aggregated DER status by type."""
@@ -860,7 +443,7 @@ class GridOrchestrator:
         return {}
 
     def get_generator_states(self) -> Dict:
-        """Per-generator dynamic state (frequency, angle, power)."""
+        """Per-generator dynamic state."""
         if self.dynamics:
             return self.dynamics.get_generator_states()
         return {}
@@ -873,31 +456,29 @@ class GridOrchestrator:
         """Generator metadata grouped by area."""
         return self.sg.get_controllable_generators()
 
-    def episode_summary(self) -> Dict:
-        """Summary statistics for the completed episode."""
-        if not self._history:
-            return {}
-        return {
-            "episode": self._episode_count,
-            "steps": len(self._history),
-            "cumulative_reward": self._cumulative_reward,
-            "avg_reward": self._cumulative_reward / max(len(self._history), 1),
-            "pf_convergence_rate": sum(
-                1 for h in self._history if h["pf_converged"]
-            ) / max(len(self._history), 1),
-            "avg_frequency_hz": np.mean(
-                [h["frequency_hz"] for h in self._history]
-            ),
-            "max_freq_deviation_hz": max(
-                abs(h["frequency_hz"] - 50.0) for h in self._history
-            ),
-            "total_voltage_violations": sum(
-                h["voltage_violations"] for h in self._history
-            ),
-            "total_protection_trips": sum(
-                h["protection_trips"] for h in self._history
-            ),
-        }
+    def get_area_generators(self, area: AreaID) -> List[int]:
+        """Return generator indices for a specific area."""
+        offset = {"A": 0, "B": 39, "C": 78}[area.value]
+        gen_indices = []
+        for idx in self.sg.net.gen.index:
+            bus = int(self.sg.net.gen.at[idx, "bus"])
+            if offset <= bus < offset + 39:
+                gen_indices.append(int(idx))
+        return gen_indices
+
+    def get_area_der_specs(self, area: AreaID) -> List:
+        """Return DER specs for a specific area."""
+        if self.der_manager is None:
+            return []
+        return [s for s in self.der_manager.der_specs if s.area_id == area.value]
+
+    def get_generator_limits(self, gen_idx: int) -> Tuple[float, float]:
+        """Return (p_min_mw, p_max_mw) for a generator."""
+        net = self.sg.net
+        return (
+            float(net.gen.at[gen_idx, "min_p_mw"]),
+            float(net.gen.at[gen_idx, "max_p_mw"]),
+        )
 
     # ─── internal helpers ──────────────────────────────────────────
 
@@ -910,10 +491,7 @@ class GridOrchestrator:
         return result
 
     def _get_der_load_indices(self) -> set:
-        """Return the set of pandapower load indices that are DER-managed
-        (EV charging stations and demand response programs).
-        FIX NEW-BUG-01: These loads are RL-agent-controlled and must
-        be excluded from blanket load-profile scaling."""
+        """Return pandapower load indices that are DER-managed."""
         indices = set()
         dm = self.der_manager
         if dm is None:
@@ -943,15 +521,6 @@ class GridOrchestrator:
 
         dm.update_ev_charging_by_hour(hour)
 
-    def _build_observation(self) -> np.ndarray:
-        """Construct the normalised observation vector."""
-        grid_state = self.sg.get_global_state()
-        der_status = self.get_der_status()
-        return self.obs_builder.build(
-            grid_state=grid_state,
-            der_status=der_status,
-            frequency_hz=self.system_frequency_hz,
-            profiles=self.profiles,
-            step=self._step_count,
-            last_reward=self._last_reward,
-        )
+
+# Backward compatibility alias
+GridOrchestrator = PhysicsEngine

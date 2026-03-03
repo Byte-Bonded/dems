@@ -5,8 +5,8 @@ Integrated from files/ and somu_test/ into dems framework
 Provides:
 - PyPower-compatible microgrid case structure
 - Newton-Raphson power flow solver (standalone, no pandapower dependency)
-- DER component models (Solar, Wind, Battery, Diesel)
-- Microgrid controller with droop and SOC management
+- DER component models (Solar, Wind, Diesel)
+- Microgrid controller with droop control
 - 24-hour time-series simulation capability
 
 This module complements the pandapower-based SuperGrid simulation
@@ -191,58 +191,6 @@ class WindTurbine(DERComponent):
         P *= self.status
         Q = P * np.tan(np.arccos(self.power_factor))
         return P, Q
-
-
-class BatteryESS(DERComponent):
-    """Battery Energy Storage System with SOC tracking"""
-
-    def __init__(self, name: str, bus: int, rated_power: float,
-                 capacity: float, initial_soc: float = 0.5,
-                 min_soc: float = 0.1, max_soc: float = 0.9,
-                 charge_efficiency: float = 0.95,
-                 discharge_efficiency: float = 0.95):
-        super().__init__(name, bus, rated_power)
-        self.capacity = capacity  # MWh
-        self.soc = initial_soc
-        self.min_soc = min_soc
-        self.max_soc = max_soc
-        self.charge_efficiency = charge_efficiency
-        self.discharge_efficiency = discharge_efficiency
-        self.mode = 'idle'  # 'charging', 'discharging', 'idle'
-        self._last_power = 0.0
-
-    def set_power_command(self, P_command: float, dt: float = 1.0) -> float:
-        """
-        Set power command and update SOC.
-
-        Args:
-            P_command: Power in MW (positive=discharge, negative=charge)
-            dt: Time step in hours
-
-        Returns:
-            Actual power delivered/absorbed (MW)
-        """
-        if P_command > 0:  # Discharging
-            P_actual = min(P_command, self.rated_power)
-            P_actual = min(P_actual, (self.soc - self.min_soc) * self.capacity / dt)
-            self.soc -= (P_actual * dt) / (self.capacity * self.discharge_efficiency)
-            self.mode = 'discharging'
-        elif P_command < 0:  # Charging
-            P_actual = max(P_command, -self.rated_power)
-            P_actual = max(P_actual, -((self.max_soc - self.soc) * self.capacity / dt))
-            self.soc -= (P_actual * dt * self.charge_efficiency) / self.capacity
-            self.mode = 'charging'
-        else:
-            P_actual = 0.0
-            self.mode = 'idle'
-
-        self.soc = np.clip(self.soc, self.min_soc, self.max_soc)
-        self._last_power = P_actual
-        return P_actual
-
-    def get_output(self, time_step: float) -> Tuple[float, float]:
-        """Get current battery power output"""
-        return self._last_power * self.status, 0.0
 
 
 class DieselGenerator(DERComponent):
@@ -594,26 +542,6 @@ class MicrogridController:
         """Q-V droop control"""
         return Q_ref - droop_coeff * (V_measured - V_ref)
 
-    def battery_soc_control(self, battery: BatteryESS, P_net: float,
-                            dt: float = 1.0) -> float:
-        """
-        Battery SOC management.
-        Positive P_net = excess generation (charge battery)
-        Negative P_net = deficit (discharge battery)
-        """
-        if P_net > 0.1:
-            P_command = -min(P_net, battery.rated_power)
-        elif P_net < -0.1:
-            P_command = min(abs(P_net), battery.rated_power)
-        else:
-            if battery.soc < 0.45:
-                P_command = -battery.rated_power * 0.2
-            elif battery.soc > 0.55:
-                P_command = battery.rated_power * 0.2
-            else:
-                P_command = 0.0
-        return battery.set_power_command(P_command, dt)
-
     def update_generation(self, time_step: float):
         """Update all DER outputs and apply to case gen array"""
         gen = self.case.gen
@@ -636,7 +564,7 @@ def create_example_microgrid() -> Tuple[MicrogridCase, Dict[str, DERComponent]]:
     - Bus 0: Main grid connection (slack bus)
     - Bus 1: Solar PV + residential load
     - Bus 2: Wind turbine + commercial load
-    - Bus 3: Battery ESS + industrial load
+    - Bus 3: Industrial load
     - Bus 4: Diesel generator + load
     """
     case = MicrogridCase(baseMVA=100.0)
@@ -668,7 +596,6 @@ def create_example_microgrid() -> Tuple[MicrogridCase, Dict[str, DERComponent]]:
     ders = {
         'solar_pv': SolarPV('Solar_PV_1', bus=1, rated_power=3.0, efficiency=0.95),
         'wind_turbine': WindTurbine('Wind_1', bus=2, rated_power=2.5),
-        'battery': BatteryESS('BESS_1', bus=3, rated_power=2.0, capacity=4.0),
         'diesel': DieselGenerator('Diesel_1', bus=4, rated_power=3.0)
     }
 

@@ -55,7 +55,6 @@ from src.simulation.microgrid import (
     MicrogridController,
     SolarPV,
     WindTurbine,
-    BatteryESS,
     DieselGenerator,
     create_example_microgrid,
     create_ieee14_case,
@@ -290,12 +289,11 @@ class TestDERManagement:
         assert len(der.der_specs) > 0
 
     def test_der_types_present(self, supergrid):
-        """Solar, wind, battery, EV, and DR should all be present"""
+        """Solar, wind, EV, and DR should all be present"""
         der = supergrid.initialize_der()
         status = der.get_status()
         assert status["solar"]["unit_count"] > 0
         assert status["wind"]["unit_count"] > 0
-        assert status["battery"]["unit_count"] > 0
         assert status["ev_charger"]["unit_count"] > 0
         assert status["demand_response"]["unit_count"] > 0
 
@@ -324,19 +322,6 @@ class TestDERManagement:
         der.set_wind_output("Wind_B1", 16.0)
         state = der.get_der_state("Wind_B1")
         assert state.current_output_mw > 0
-
-    def test_battery_charge_discharge(self, supergrid):
-        """Battery can charge and discharge"""
-        der = supergrid.initialize_der()
-        # Discharge
-        der.set_battery_power("BESS_A1", 10.0)
-        state = der.get_der_state("BESS_A1")
-        assert state.current_output_mw > 0
-
-        # Charge (negative power)
-        der.set_battery_power("BESS_A1", -10.0)
-        state = der.get_der_state("BESS_A1")
-        assert state.current_output_mw < 0
 
     def test_ev_charging_load(self, supergrid):
         """EV charging load adjustable"""
@@ -610,7 +595,7 @@ class TestMicrogridPowerFlow:
         assert case.bus_count == 5
         assert case.gen_count == 5
         assert case.branch_count == 5
-        assert len(ders) == 4
+        assert len(ders) == 3  # solar, wind, diesel (battery removed)
 
     def test_nr_solver_converges(self, microgrid_case):
         """NR solver converges on example microgrid"""
@@ -712,29 +697,6 @@ class TestMicrogridDERComponents:
         P_cut, _ = wind.get_output(0)
         assert P_cut == 0
 
-    def test_battery_soc_tracking(self):
-        """Battery SOC changes with charge/discharge"""
-        batt = BatteryESS("B1", bus=0, rated_power=2.0, capacity=4.0, initial_soc=0.5)
-        initial_soc = batt.soc
-
-        # Discharge
-        batt.set_power_command(1.0, dt=1.0)
-        assert batt.soc < initial_soc
-
-        # Charge
-        mid_soc = batt.soc
-        batt.set_power_command(-1.0, dt=1.0)
-        assert batt.soc > mid_soc
-
-    def test_battery_soc_limits(self):
-        """Battery SOC stays within min/max bounds"""
-        batt = BatteryESS("B1", bus=0, rated_power=2.0, capacity=4.0,
-                           initial_soc=0.15, min_soc=0.1, max_soc=0.9)
-
-        # Try to overdischarge
-        batt.set_power_command(100.0, dt=10.0)
-        assert batt.soc >= batt.min_soc
-
     def test_diesel_ramp_rate(self):
         """Diesel generator respects ramp rate.
         ramp_rate=0.5 MW/min, dt in hours.  dt=1/60 h = 1 min → max_change=0.5 MW."""
@@ -775,19 +737,6 @@ class TestMicrogridController:
         P = ctrl.droop_control(P_measured=1.0, f_measured=49.9,
                                P_ref=1.0, f_ref=50.0, droop_coeff=10.0)
         assert P > 1.0
-
-    def test_battery_soc_management(self):
-        """Controller manages battery SOC properly"""
-        case, ders = create_example_microgrid()
-        ctrl = MicrogridController(case, ders)
-
-        # Excess power → should charge
-        P = ctrl.battery_soc_control(ders['battery'], P_net=2.0, dt=1.0)
-        assert P < 0, "Should charge when excess generation"
-
-        # Power deficit → should discharge
-        P = ctrl.battery_soc_control(ders['battery'], P_net=-2.0, dt=1.0)
-        assert P > 0, "Should discharge when deficit"
 
 
 # ======================== 13. TIME-SERIES + GLOBAL STATE ======================== #
@@ -914,17 +863,15 @@ class TestEdgeCases:
             pass  # Expected
 
 
-# ======================== 16. ORCHESTRATOR ======================== #
+# ======================== 16. ORCHESTRATOR (PhysicsEngine) ======================== #
 
 from src.simulation.orchestrator import (
-    GridOrchestrator,
+    PhysicsEngine,
     ScenarioConfig,
     StochasticProfileGenerator,
-    ObservationBuilder,
-    RewardCalculator,
-    ActionMapper,
-    ActionType,
 )
+
+GridOrchestrator = PhysicsEngine  # alias for backward compat
 
 
 @pytest.fixture(scope="module")
@@ -934,137 +881,23 @@ def orchestrator():
         episode_length_steps=20,     # short for testing
         dynamics_substeps=2,          # minimal for speed
     )
-    orch = GridOrchestrator(scenario=cfg, seed=123)
+    orch = PhysicsEngine(scenario=cfg, seed=123)
     return orch
 
 
 class TestOrchestratorConstruction:
-    """Orchestrator builds correctly with full grid, DER, dynamics."""
-
-    def test_orchestrator_observation_dim(self, orchestrator):
-        assert orchestrator.observation_dim == 42
-
-    def test_orchestrator_action_dim_positive(self, orchestrator):
-        assert orchestrator.action_dim > 0
+    """PhysicsEngine builds correctly with full grid, DER, dynamics."""
 
     def test_orchestrator_initial_frequency(self, orchestrator):
         assert 49.0 < orchestrator.system_frequency_hz < 51.0
 
-    def test_orchestrator_grid_state_has_areas(self, orchestrator):
-        state = orchestrator.get_grid_state()
-        assert "areas" in state
-        assert "global_metrics" in state
-
     def test_orchestrator_der_status_keys(self, orchestrator):
         status = orchestrator.get_der_status()
-        # DER manager was initialized, so status should have keys
         assert isinstance(status, dict)
 
     def test_orchestrator_generator_states(self, orchestrator):
         gs = orchestrator.get_generator_states()
         assert isinstance(gs, dict)
-
-
-class TestOrchestratorReset:
-    """Reset produces a valid observation and resets bookkeeping."""
-
-    def test_reset_returns_correct_shape(self, orchestrator):
-        obs = orchestrator.reset(seed=42)
-        assert obs.shape == (42,)
-        assert obs.dtype == np.float32
-
-    def test_reset_observation_bounded(self, orchestrator):
-        obs = orchestrator.reset(seed=99)
-        assert np.all(obs >= -2.0)
-        assert np.all(obs <= 2.0)
-
-    def test_reset_clears_step_count(self, orchestrator):
-        orchestrator.reset(seed=42)
-        assert orchestrator.step_count == 0
-        assert not orchestrator.is_done
-
-
-class TestOrchestratorStep:
-    """Step executes the full simulation pipeline."""
-
-    def test_step_returns_tuple(self, orchestrator):
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        result = orchestrator.step(action)
-        assert len(result) == 4
-        obs, reward, done, info = result
-
-    def test_step_obs_shape(self, orchestrator):
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        obs, _, _, _ = orchestrator.step(action)
-        assert obs.shape == (42,)
-
-    def test_step_reward_is_float(self, orchestrator):
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        _, reward, _, _ = orchestrator.step(action)
-        assert isinstance(reward, float)
-
-    def test_step_info_has_keys(self, orchestrator):
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        _, _, _, info = orchestrator.step(action)
-        for key in ["step", "pf_converged", "frequency_hz", "total_gen_mw",
-                     "reward_breakdown", "cumulative_reward"]:
-            assert key in info, f"Missing key: {key}"
-
-    def test_step_increments_count(self, orchestrator):
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        orchestrator.step(action)
-        assert orchestrator.step_count == 1
-
-    def test_multiple_steps(self, orchestrator):
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        for _ in range(5):
-            obs, reward, done, info = orchestrator.step(action)
-        assert orchestrator.step_count == 5
-
-    def test_episode_terminates(self, orchestrator):
-        """Episode ends after episode_length_steps."""
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        for _ in range(orchestrator.cfg.episode_length_steps):
-            obs, reward, done, info = orchestrator.step(action)
-        assert done is True
-        assert orchestrator.is_done
-
-    def test_step_after_done_raises(self, orchestrator):
-        """Cannot step after episode is done."""
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        for _ in range(orchestrator.cfg.episode_length_steps):
-            orchestrator.step(action)
-        with pytest.raises(RuntimeError):
-            orchestrator.step(action)
-
-
-class TestOrchestratorEpisodeSummary:
-    """Episode summary contains correct statistics."""
-
-    def test_summary_after_episode(self, orchestrator):
-        orchestrator.reset(seed=42)
-        action = np.full(orchestrator.action_dim, 0.5)
-        for _ in range(orchestrator.cfg.episode_length_steps):
-            orchestrator.step(action)
-        summary = orchestrator.episode_summary()
-        assert summary["steps"] == orchestrator.cfg.episode_length_steps
-        assert "cumulative_reward" in summary
-        assert "avg_frequency_hz" in summary
-        assert "pf_convergence_rate" in summary
-
-    def test_empty_summary(self, orchestrator):
-        orchestrator.reset(seed=42)
-        # No steps taken — history is empty
-        summary = orchestrator.episode_summary()
-        assert summary == {}
 
 
 class TestStochasticProfiles:
@@ -1119,119 +952,6 @@ class TestStochasticProfiles:
         # Step 0 = hour 0 (midnight; night)
         assert p.solar_irradiance(0) == 0.0
 
-
-class TestRewardCalculator:
-    """Reward responds correctly to grid conditions."""
-
-    def test_perfect_conditions_high_reward(self):
-        cfg = ScenarioConfig()
-        rc = RewardCalculator(cfg)
-        rc.reset()
-        # Simulate a perfectly converged result
-        pf = PowerFlowResult(
-            converged=True,
-            iterations=3,
-            elapsed_time_ms=10.0,
-            total_generation_mw=5000,
-            total_load_mw=4800,
-            total_losses_mw=50,
-            num_voltage_violations=0,
-            num_line_overloads=0,
-        )
-        action = np.full(10, 0.5)
-        reward, bd = rc.compute(pf, 50.0, 0, action)
-        assert reward > 0.5, f"Perfect conditions should yield high reward, got {reward}"
-
-    def test_frequency_deviation_penalty(self):
-        cfg = ScenarioConfig()
-        rc = RewardCalculator(cfg)
-        rc.reset()
-        pf = PowerFlowResult(
-            converged=True,
-            iterations=3,
-            elapsed_time_ms=10.0,
-            total_generation_mw=5000,
-            total_load_mw=4800,
-            total_losses_mw=50,
-            num_voltage_violations=0,
-            num_line_overloads=0,
-        )
-        action = np.full(10, 0.5)
-        r_ok, _ = rc.compute(pf, 50.0, 0, action)
-        r_bad, bd = rc.compute(pf, 49.0, 0, action)
-        assert r_ok > r_bad, "Frequency deviation should reduce reward"
-        assert bd["r_frequency"] < 0.5
-
-    def test_protection_trip_penalty(self):
-        cfg = ScenarioConfig()
-        rc = RewardCalculator(cfg)
-        rc.reset()
-        pf = PowerFlowResult(
-            converged=True,
-            iterations=3,
-            elapsed_time_ms=10.0,
-            total_generation_mw=5000,
-            total_load_mw=4800,
-            total_losses_mw=50,
-            num_voltage_violations=0,
-            num_line_overloads=0,
-        )
-        action = np.full(10, 0.5)
-        r_ok, _ = rc.compute(pf, 50.0, 0, action)
-        r_trip, _ = rc.compute(pf, 50.0, 3, action)
-        assert r_ok > r_trip
-
-    def test_non_converged_pf_negative(self):
-        cfg = ScenarioConfig()
-        rc = RewardCalculator(cfg)
-        rc.reset()
-        pf = PowerFlowResult(
-            converged=False,
-            iterations=0,
-            elapsed_time_ms=0.0,
-            total_generation_mw=0,
-            total_load_mw=0,
-            total_losses_mw=0,
-            num_voltage_violations=0,
-            num_line_overloads=0,
-        )
-        action = np.full(10, 0.5)
-        reward, _ = rc.compute(pf, 50.0, 0, action)
-        assert reward < 0, "Non-converged PF should yield negative reward"
-
-
-class TestObservationBuilder:
-    """Observation vector is correctly normalised and shaped."""
-
-    def test_obs_shape(self):
-        cfg = ScenarioConfig(episode_length_steps=100)
-        rng = np.random.default_rng(42)
-        p = StochasticProfileGenerator(cfg, rng)
-        p.reset()
-        ob = ObservationBuilder(cfg)
-        gs = {"areas": {"A": {}, "B": {}, "C": {}}, "global_metrics": {}}
-        obs = ob.build(gs, {}, 50.0, p, 0, 0.0)
-        assert obs.shape == (42,)
-
-    def test_obs_bounded(self):
-        cfg = ScenarioConfig(episode_length_steps=100)
-        rng = np.random.default_rng(42)
-        p = StochasticProfileGenerator(cfg, rng)
-        p.reset()
-        ob = ObservationBuilder(cfg)
-        gs = {"areas": {"A": {}, "B": {}, "C": {}}, "global_metrics": {}}
-        obs = ob.build(gs, {}, 50.0, p, 0, 0.0)
-        assert np.all(obs >= -2.0) and np.all(obs <= 2.0)
-
-
-class TestActionMapper:
-    """ActionMapper correctly discovers controllable assets."""
-
-    def test_action_dim_matches_grid(self, orchestrator):
-        am = orchestrator.action_mapper
-        # Should have generators + DER
-        assert am.action_dim > 0
-        assert len(am._gen_indices) > 0
 
 
 # ======================== PSS WASHOUT FILTER TEST (BUG-22) ======================== #

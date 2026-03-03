@@ -287,20 +287,17 @@ class MonitoringOrchestrator:
         
         solar = der_status.get("solar", {})
         wind = der_status.get("wind", {})
-        battery = der_status.get("battery", {})
         ev = der_status.get("ev_charger", {})
         dr = der_status.get("demand_response", {})
         
         self.logger.info(f"Solar PV:     {solar.get('unit_count', 0)} units, {solar.get('total_capacity_mw', 0):.2f} MW capacity, {solar.get('current_output_mw', 0):.2f} MW output")
         self.logger.info(f"Wind:         {wind.get('unit_count', 0)} units, {wind.get('total_capacity_mw', 0):.2f} MW capacity, {wind.get('current_output_mw', 0):.2f} MW output")
-        self.logger.info(f"Battery:      {battery.get('unit_count', 0)} units, {battery.get('capacity_mwh', 0):.2f} MWh, {battery.get('current_soc_pct', 0):.1f}% SOC")
         self.logger.info(f"EV Charging:  {ev.get('unit_count', 0)} units, {ev.get('max_power_mw', 0):.2f} MW max, {ev.get('current_power_mw', 0):.2f} MW current")
         self.logger.info(f"Demand Resp:  {dr.get('unit_count', 0)} units, {dr.get('available_mw', 0):.2f} MW available, {dr.get('curtailed_mw', 0):.2f} MW curtailed")
         
         total_capacity = (
             solar.get('total_capacity_mw', 0) +
             wind.get('total_capacity_mw', 0) +
-            battery.get('power_mw', 0) +
             ev.get('max_power_mw', 0) +
             dr.get('available_mw', 0)
         )

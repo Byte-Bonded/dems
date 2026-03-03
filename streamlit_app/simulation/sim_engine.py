@@ -180,11 +180,6 @@ class SimEngine:
                 dm.update_ev_charging_by_hour(int(hour) % 24)
             except Exception:
                 pass
-            # Battery SOC
-            try:
-                dm.update_battery_soc(dt_hours)
-            except Exception:
-                pass
             # Clear overrides after use (so next step uses auto profile)
             self._irr_override = None
             self._ws_override = None
@@ -230,11 +225,6 @@ class SimEngine:
 
     def set_wind_speed(self, speed: float) -> None:
         self._ws_override = speed
-
-    def set_battery_power(self, name: str, power_mw: float) -> None:
-        dm = self.grid.supergrid.der_manager
-        if dm:
-            dm.set_battery_power(name, power_mw)
 
     def set_dr_curtailment(self, name: str, fraction: float) -> None:
         dm = self.grid.supergrid.der_manager
