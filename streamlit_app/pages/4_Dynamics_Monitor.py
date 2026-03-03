@@ -1,6 +1,6 @@
 """
 Page 4 – Dynamics Monitor
-Generator frequency/angle, AGC, protection relay status.
+Generator frequency/angle, protection relay status.
 """
 
 import sys, os
@@ -20,7 +20,7 @@ from streamlit_app.components.sidebar import render_sidebar
 render_sidebar()
 
 st.markdown("## 📊 Dynamics Monitor")
-st.markdown("*Generator swing dynamics, AGC, exciter/governor, protection relays*")
+st.markdown("*Generator swing dynamics, exciter/governor, protection relays*")
 
 snap = get_current()
 hist = get_history(80)
@@ -69,8 +69,8 @@ with c3:
     # Quick stats
     n_gens = len(snap.generator_frequencies) if snap.generator_frequencies else 0
     metric_card("Generators Tracked", str(n_gens), color="#4ECDC4", icon="⚙️")
-    n_agc = len(snap.agc_adjustments) if snap.agc_adjustments else 0
-    metric_card("AGC Controllers", str(n_agc), color="#FFE66D", icon="🎛️")
+    n_prot = len(snap.protection_status) if snap.protection_status else 0
+    metric_card("Protection Relays", str(n_prot), color="#FFE66D", icon="🛡️")
 
 # ── Frequency time-series ────────────────────────────────────────────────
 st.markdown("#### Frequency Trend")
@@ -126,22 +126,6 @@ if snap.generator_angles:
     st.plotly_chart(fig_angle, use_container_width=True, key="dyn_angles")
 else:
     st.info("Rotor angle data not yet available.")
-
-# ── AGC Panel ────────────────────────────────────────────────────────────
-st.markdown("#### AGC (Automatic Generation Control)")
-if snap.agc_adjustments:
-    for area_id, adjustments in snap.agc_adjustments.items():
-        with st.expander(f"Area {area_id} AGC", expanded=True):
-            if isinstance(adjustments, dict):
-                adj_rows = [{"Generator": k, "ΔP (MW)": round(v, 3)} for k, v in adjustments.items()]
-                if adj_rows:
-                    st.dataframe(pd.DataFrame(adj_rows), use_container_width=True, height=200)
-                else:
-                    st.write("No adjustments")
-            else:
-                st.write(adjustments)
-else:
-    st.info("AGC data not available. Dynamics must be initialised.")
 
 # ── Protection Relays ────────────────────────────────────────────────────
 st.markdown("#### Protection Relay Status")

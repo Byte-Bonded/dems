@@ -110,6 +110,13 @@ class RLAgent(BaseRLAgent):
                     gamma=0.99,
                     gae_lambda=0.95,
                     clip_range=0.2,
+                    ent_coef=0.01,
+                    vf_coef=0.5,
+                    max_grad_norm=0.5,
+                    normalize_advantage=True,
+                    policy_kwargs=dict(
+                        net_arch=dict(pi=[128, 128], vf=[128, 128]),
+                    ),
                     verbose=self.verbose,
                     tensorboard_log=self.tensorboard_log,
                 )

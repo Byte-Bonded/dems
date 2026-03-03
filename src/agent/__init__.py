@@ -2,5 +2,6 @@
 
 from .rl_agent import RLAgent
 from .environment import DEMSEnvironment
+from .callbacks import DEMSTrainingCallback
 
-__all__ = ["RLAgent", "DEMSEnvironment"]
+__all__ = ["RLAgent", "DEMSEnvironment", "DEMSTrainingCallback"]

@@ -270,7 +270,7 @@ class SimEngine:
 
         gen_freqs: Dict[str, float] = {}
         gen_angles: Dict[str, float] = {}
-        agc_adj: Dict[str, Dict[str, float]] = {}
+        protection: Dict[str, Dict] = {}
 
         # Per-generator frequencies + angles
         if not sg.net.gen.empty:
@@ -282,18 +282,19 @@ class SimEngine:
                 gen_freqs[gid] = sys_freq + random.gauss(0, 0.015)
                 gen_angles[gid] = random.gauss(0, 8)  # degrees
 
-            # Synthetic AGC per area
-            for a in ["A", "B", "C"]:
-                area_gens = {k: v for k, v in gen_freqs.items() if f"_{a}_" in k}
-                if area_gens:
-                    agc_adj[a] = {k: random.gauss(0, 0.5) for k in list(area_gens.keys())[:3]}
+                # Protection relay status (normally healthy)
+                gf = gen_freqs[gid]
+                tripped = abs(gf - 50.0) > 0.45
+                protection[gid] = {
+                    "tripped": tripped,
+                    "trip_reason": f"Frequency {gf:.3f} Hz" if tripped else "—",
+                }
 
         return {
             "system_frequency_hz": sys_freq,
             "generator_frequencies": gen_freqs,
             "generator_angles": gen_angles,
-            "agc_adjustments": agc_adj,
-            "protection": {},
+            "protection": protection,
         }
 
     # ----- internal ----------------------------------------------------
@@ -404,15 +405,14 @@ class SimEngine:
         snap.system_frequency_hz = sg.system_frequency_hz
         if dyn_result:
             snap.system_frequency_hz = dyn_result.get("system_frequency_hz", 50.0)
+            snap.generator_frequencies = dyn_result.get("generator_frequencies", {})
+            snap.generator_angles = dyn_result.get("generator_angles", {})
+            prot = dyn_result.get("protection", {})
+            if prot:
+                snap.protection_status = prot
         # NaN guard: never expose NaN to the UI
         import math
         if math.isnan(snap.system_frequency_hz):
             snap.system_frequency_hz = 50.0
-            snap.generator_frequencies = dyn_result.get("generator_frequencies", {})
-            snap.generator_angles = dyn_result.get("generator_angles", {})
-            snap.agc_adjustments = dyn_result.get("agc_adjustments", {})
-            prot = dyn_result.get("protection", {})
-            if prot:
-                snap.protection_status = prot
 
         return snap
