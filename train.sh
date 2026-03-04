@@ -19,6 +19,7 @@ set -euo pipefail
 # ── Project paths ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
+export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 
 # Auto-detect venv: check ./venv, ./.venv, ../venv, ../.venv, or VENV_DIR env var
 if [[ -n "${VENV_DIR:-}" ]]; then
@@ -116,33 +117,53 @@ else
 fi
 
 # Run Python GPU detection to get full details
+# We use a more robust detection script that handles mismatches between requested and available devices
 GPU_INFO=$(python3 -c "
-import torch, json
-info = {'device': 'cpu', 'gpu_name': 'N/A', 'gpu_mem_gb': 0, 'cuda_version': 'N/A', 'torch_version': torch.__version__}
+import torch, json, sys
+info = {
+    'device': 'cpu',
+    'gpu_name': 'N/A',
+    'gpu_mem_gb': 0.0,
+    'cuda_version': 'N/A',
+    'torch_version': torch.__version__,
+    'actual_device': 'cpu',
+    'warning': None
+}
 requested = '${DEVICE}'
-if requested == 'auto':
-    if torch.cuda.is_available():
-        info['device'] = 'cuda'
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        info['device'] = 'mps'
-else:
-    info['device'] = requested
-if info['device'] == 'cuda' and torch.cuda.is_available():
+
+if torch.cuda.is_available():
+    info['actual_device'] = 'cuda'
     info['gpu_name'] = torch.cuda.get_device_name(0)
-    info['gpu_mem_gb'] = round(torch.cuda.get_device_properties(0).total_mem / (1024**3), 1)
+    info['gpu_mem_gb'] = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
     info['cuda_version'] = torch.version.cuda or 'N/A'
-    info['cudnn_version'] = str(torch.backends.cudnn.version()) if torch.backends.cudnn.is_available() else 'N/A'
     info['compute_capability'] = '.'.join(str(x) for x in torch.cuda.get_device_capability(0))
-elif info['device'] == 'mps':
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    info['actual_device'] = 'mps'
     info['gpu_name'] = 'Apple Metal (MPS)'
+
+if requested == 'auto':
+    info['device'] = info['actual_device']
+else:
+    if requested != info['actual_device'] and requested != 'cpu':
+        info['warning'] = 'Requested ' + requested + ' but it is not available. Falling back to ' + info['actual_device'] + '.'
+        info['device'] = info['actual_device']
+    else:
+        info['device'] = requested
+
 print(json.dumps(info))
-" 2>/dev/null) || GPU_INFO='{"device":"cpu","gpu_name":"N/A","gpu_mem_gb":0,"torch_version":"?","cuda_version":"N/A"}'
+" 2>/dev/null) || GPU_INFO='{"device":"cpu","actual_device":"cpu","gpu_name":"N/A","gpu_mem_gb":0.0,"torch_version":"?","cuda_version":"N/A"}'
 
 DEVICE=$(echo "$GPU_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['device'])")
+ACTUAL_DEVICE=$(echo "$GPU_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['actual_device'])")
 GPU_NAME=$(echo "$GPU_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['gpu_name'])")
 GPU_MEM_GB=$(echo "$GPU_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['gpu_mem_gb'])")
 TORCH_VER=$(echo "$GPU_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['torch_version'])")
 CUDA_VER=$(echo "$GPU_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cuda_version','N/A'))")
+GPU_WARN=$(echo "$GPU_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('warning',''))")
+
+if [[ -n "$GPU_WARN" ]]; then
+    warn "$GPU_WARN"
+fi
 
 if [[ "$DEVICE" == "cuda" ]]; then
     echo -e "${GREEN}${BOLD}  ┌──────────────────────────────────────────────────┐${NC}"
@@ -160,8 +181,11 @@ if [[ "$DEVICE" == "cuda" ]]; then
     # Enable TF32 for Ampere+ GPUs (RTX 3000/4000 series) — ~2x matmul speedup
     export NVIDIA_TF32_OVERRIDE=1
 
-    # VRAM hard cap — leave ~1 GB headroom for OS/display
-    VRAM_LIMIT="${VRAM_LIMIT:-7.0}"
+    # Dynamic VRAM hard cap — leave ~1 GB headroom for OS/display, max 7.0GB
+    # If GPU has 8GB, cap at 7GB. If GPU has 4GB, cap at 3GB.
+    if [[ -z "${VRAM_LIMIT:-}" ]]; then
+        VRAM_LIMIT=$(python3 -c "print(round(min(7.0, max(0.5, $GPU_MEM_GB - 1.0)), 1))")
+    fi
     log "VRAM cap: ${VRAM_LIMIT} GB (of ${GPU_MEM_GB} GB total)"
 
 elif [[ "$DEVICE" == "mps" ]]; then

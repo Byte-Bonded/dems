@@ -16,6 +16,7 @@ The HierarchicalTrainer manages:
 import logging
 import time
 import json
+import gymnasium as gym
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -47,16 +48,61 @@ class TrainingConfig:
     # Whether to train sub-agents
     train_sub_agents: bool = True
     # Steps per level before cycling (round-robin)
-    steps_per_level: int = 2048
+    steps_per_level: int = 4096
     seed: int = 42
     # Device: 'auto', 'cuda', 'mps', or 'cpu'
     device: str = "auto"
     # GPU VRAM hard cap in GB (0 = unlimited)
     gpu_vram_limit_gb: float = 7.0
     # GPU-optimised batch sizes (used when device != cpu)
-    gpu_batch_size_central: int = 256
-    gpu_batch_size_mg: int = 256
-    gpu_batch_size_sub: int = 128
+    gpu_batch_size_central: int = 1024
+    gpu_batch_size_mg: int = 512
+    gpu_batch_size_sub: int = 512
+
+
+class StandaloneEnvWrapper(gym.Env):
+    """
+    Wraps an environment for standalone training with SB3.
+    
+    When stepped, it queries the other agents for their actions using
+    the provided coordinator state. This allows training one level
+    while others act as part of the environment.
+    """
+    def __init__(self, agent_name: str, coordinator: MultiAgentStepCoordinator, agents: Dict[str, Any]):
+        super().__init__()
+        self.agent_name = agent_name
+        self.coordinator = coordinator
+        self.agents = agents
+        
+        inner_env = coordinator.get_env(agent_name)
+        self.observation_space = inner_env.observation_space
+        self.action_space = inner_env.action_space
+        self._last_all_obs: Optional[Dict[str, np.ndarray]] = None
+
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
+        self._last_all_obs = self.coordinator.reset(seed=seed)
+        return self._last_all_obs[self.agent_name], {}
+
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        actions = {}
+        # Get actions for all agents
+        for name, agent in self.agents.items():
+            if name == self.agent_name:
+                actions[name] = action
+            else:
+                obs = self._last_all_obs.get(name)
+                if obs is not None:
+                    # SB3 agents predict returns (action, states)
+                    actions[name], _ = agent.model.predict(obs, deterministic=False)
+                else:
+                    env = self.coordinator.get_env(name)
+                    actions[name] = np.zeros(env.action_space.shape)
+        
+        # Step coordinator
+        new_obs, rewards, done, info = self.coordinator.step(actions)
+        self._last_all_obs = new_obs
+        
+        return new_obs[self.agent_name], float(rewards[self.agent_name]), done, False, info
 
 
 class HierarchicalTrainer:
@@ -118,16 +164,18 @@ class HierarchicalTrainer:
         if device == "cuda" and self.tc.gpu_vram_limit_gb > 0:
             try:
                 import torch
-                limit_bytes = int(self.tc.gpu_vram_limit_gb * (1024 ** 3))
-                torch.cuda.set_per_process_memory_fraction(
-                    self.tc.gpu_vram_limit_gb
-                    / (torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)),
-                    device=0,
-                )
+                total_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                # Calculate fraction and clamp to [0.05, 0.95] to avoid invalid values or zero memory
+                fraction = self.tc.gpu_vram_limit_gb / total_mem_gb
+                safe_fraction = max(0.05, min(0.95, fraction))
+                
+                torch.cuda.set_per_process_memory_fraction(safe_fraction, device=0)
                 logger.info(
                     f"VRAM cap: {self.tc.gpu_vram_limit_gb:.1f} GB "
-                    f"({self.tc.gpu_vram_limit_gb / (torch.cuda.get_device_properties(0).total_mem / (1024**3)) * 100:.0f}% of total)"
+                    f"({safe_fraction * 100:.1f}% of {total_mem_gb:.1f} GB total)"
                 )
+                if safe_fraction != fraction:
+                    logger.warning(f"VRAM fraction clamped from {fraction:.2f} to {safe_fraction:.2f}")
             except Exception as e:
                 logger.warning(f"Could not set VRAM cap: {e}")
 
@@ -176,54 +224,69 @@ class HierarchicalTrainer:
         """
         Run the full hierarchical training loop.
 
-        Collects experience via the coordinator and trains all agents
-        in a round-robin fashion.
+        Trains all agents in a round-robin fashion using the StandaloneEnvWrapper
+        to co-evolve policies.
 
         Returns:
             Training summary dict.
         """
-        logger.info(f"Starting training: {self.tc.total_timesteps} total timesteps")
+        logger.info(f"Starting hierarchical training: {self.tc.total_timesteps} total steps")
         start_time = time.time()
 
         steps_done = 0
-        episode = 0
         best_eval_reward = -float("inf")
 
+        # Create level-based agent lists
+        central_agents = ["central"]
+        mg_agents = [name for name in self.agents if name.startswith("mg_")]
+        sub_agents = [name for name in self.agents if name.split("_")[0] in ("inverter", "renewable", "load")]
+
+        # Group levels to train
+        levels = [central_agents, mg_agents]
+        if self.tc.train_sub_agents:
+            levels.append(sub_agents)
+
         while steps_done < self.tc.total_timesteps:
-            # Collect one episode of experience
-            episode += 1
-            episode_rewards = self._run_episode()
-            episode_steps = self.coordinator._step_count
-            steps_done += episode_steps
+            for level in levels:
+                for agent_name in level:
+                    agent = self.agents[agent_name]
+                    
+                    # Wrap the agent's environment so it can step standalone
+                    wrapped_env = StandaloneEnvWrapper(agent_name, self.coordinator, self.agents)
+                    agent.model.set_env(wrapped_env)
+                    
+                    # Train for a small burst
+                    # Use a fixed number of steps per level update
+                    burst_steps = self.tc.steps_per_level
+                    logger.info(f"Level Update | Training '{agent_name}' for {burst_steps} steps …")
+                    
+                    # SB3 learn() will handle its own rollout collection
+                    agent.model.learn(
+                        total_timesteps=burst_steps,
+                        reset_num_timesteps=False,
+                    )
+                    
+                    steps_done += burst_steps
+                    
+                    # Periodic evaluation
+                    if steps_done % self.tc.eval_freq < burst_steps:
+                        eval_reward = self._evaluate()
+                        if eval_reward > best_eval_reward:
+                            best_eval_reward = eval_reward
+                            self.save_all(Path(self.tc.log_dir) / "best")
+                            logger.info(f"New best eval reward: {eval_reward:.3f}")
 
-            # Log
-            avg_reward = {k: np.mean(v) for k, v in episode_rewards.items()}
-            self.history.append({
-                "episode": episode,
-                "steps_done": steps_done,
-                "rewards": avg_reward,
-            })
+                    # Periodic checkpoint
+                    if steps_done % self.tc.save_freq < burst_steps:
+                        self.save_all(Path(self.tc.log_dir) / f"checkpoint_{steps_done}")
 
-            logger.info(
-                f"Episode {episode} | Steps: {steps_done}/{self.tc.total_timesteps} | "
-                f"Central reward: {avg_reward.get('central', 0):.3f}"
-            )
-
-            # Periodic evaluation
-            if steps_done % self.tc.eval_freq < episode_steps:
-                eval_reward = self._evaluate()
-                if eval_reward > best_eval_reward:
-                    best_eval_reward = eval_reward
-                    self.save_all(Path(self.tc.log_dir) / "best")
-                    logger.info(f"New best eval reward: {eval_reward:.3f}")
-
-            # Periodic checkpoint
-            if steps_done % self.tc.save_freq < episode_steps:
-                self.save_all(Path(self.tc.log_dir) / f"checkpoint_{steps_done}")
+                    if steps_done >= self.tc.total_timesteps:
+                        break
+                if steps_done >= self.tc.total_timesteps:
+                    break
 
         elapsed = time.time() - start_time
         summary = {
-            "total_episodes": episode,
             "total_steps": steps_done,
             "elapsed_seconds": elapsed,
             "best_eval_reward": best_eval_reward,
@@ -231,12 +294,6 @@ class HierarchicalTrainer:
 
         # Save final models
         self.save_all(Path(self.tc.log_dir) / "final")
-
-        # Save history
-        history_path = Path(self.tc.log_dir) / "training_history.json"
-        history_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(history_path, "w") as f:
-            json.dump(self.history, f, indent=2, default=str)
 
         logger.info(f"Training complete: {summary}")
         return summary

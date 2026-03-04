@@ -35,6 +35,8 @@ def main():
                         help="Total training timesteps (default: 1000 for smoke-test)")
     parser.add_argument("--eval-freq", type=int, default=500,
                         help="Evaluate every N steps")
+    parser.add_argument("--steps-per-level", type=int, default=4096,
+                        help="Steps to train each level before cycling")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--episode-length", type=int, default=48,
                         help="Episode length in steps (default: 48 = 4 h at 5-min)")
@@ -65,7 +67,7 @@ def main():
         logger.info(f"PyTorch {torch.__version__} | Device: {device}")
         if device == "cuda":
             gpu_name = torch.cuda.get_device_name(0)
-            gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             logger.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GB VRAM)")
             logger.info(f"CUDA {torch.version.cuda} | cuDNN {torch.backends.cudnn.version()}")
             logger.info(f"VRAM cap: {args.vram_limit:.1f} GB / {gpu_mem:.1f} GB total")

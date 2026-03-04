@@ -159,8 +159,8 @@ class CentralPPOAgent(PPOAgentWrapper):
             "name": "central",
             "net_arch": [256, 256],
             "learning_rate": 3e-4,
-            "n_steps": 2048,
-            "batch_size": 64,
+            "n_steps": 4096,
+            "batch_size": 256,
         }
         defaults.update(kwargs)
         super().__init__(env=env, **defaults)
@@ -175,7 +175,7 @@ class MicrogridPPOAgent(PPOAgentWrapper):
             "net_arch": [256, 256],
             "learning_rate": 3e-4,
             "n_steps": 2048,
-            "batch_size": 64,
+            "batch_size": 128,
         }
         defaults.update(kwargs)
         super().__init__(env=env, **defaults)
@@ -189,8 +189,8 @@ class SubPPOAgent(PPOAgentWrapper):
             "name": f"{role}_{area_id}",
             "net_arch": [128, 128],
             "learning_rate": 3e-4,
-            "n_steps": 1024,
-            "batch_size": 32,
+            "n_steps": 2048,
+            "batch_size": 64,
         }
         defaults.update(kwargs)
         super().__init__(env=env, **defaults)
