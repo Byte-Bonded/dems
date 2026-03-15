@@ -1,0 +1,240 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\begin{document}
+
+\title{Dynamic Energy Management in Microgrids using Multi-Agent Reinforcement Learning}
+
+\author{\IEEEauthorblockN{Pranaav}
+\IEEEauthorblockA{Amrita School of Artificial Intelligence\\
+Amrita Vishwa Vidyapeetham\\
+Coimbatore, India}
+\and
+\IEEEauthorblockN{Kaveen Kawsal}
+\IEEEauthorblockA{Amrita School of Artificial Intelligence\\
+Amrita Vishwa Vidyapeetham\\
+Coimbatore, India}
+\and
+\IEEEauthorblockN{Sri Somesh S}
+\IEEEauthorblockA{Amrita School of Artificial Intelligence\\
+Amrita Vishwa Vidyapeetham\\
+Coimbatore, India}
+\and
+\IEEEauthorblockN{Sai Chakrith sulluru}
+\IEEEauthorblockA{Amrita School of Artificial Intelligence\\
+Amrita Vishwa Vidyapeetham\\
+Coimbatore, India}
+\and
+\IEEEauthorblockN{Rahul S}
+\IEEEauthorblockA{Amrita School of Artificial Intelligence\\
+Amrita Vishwa Vidyapeetham\\
+Coimbatore, India}
+}
+
+\maketitle
+
+\begin{abstract}
+This paper presents a hierarchical multi-agent reinforcement learning (MARL) framework for dynamic energy management in large-scale power systems with high penetration of distributed energy resources (DER). The proposed system operates on a 117-bus tri-area SuperGrid constructed by merging three IEEE 39-bus (New England) test systems into a mesh-interconnected topology with eight inter-area tie-lines, 30 synchronous generators, and an integrated DER fleet comprising 205 MW of solar photovoltaic capacity, 250 MW of wind generation, 120 MWh of battery energy storage, 200 electric vehicle chargers, and 36.5 MW of demand response. A three-level Centralized Training with Decentralized Execution (CTDE) architecture deploys 13 Proximal Policy Optimization (PPO) agents organized hierarchically: a single central coordination agent governing inter-area power balance and tie-line flow targets, three microgrid-level agents managing area-specific generation dispatch and DER curtailment, and nine task-specific sub-agents controlling individual inverter setpoints, renewable curtailment fractions, and flexible load participation. Each agent operates within a dedicated Gymnasium environment with level-appropriate observation and action spaces, and receives a bounded, multi-objective reward signal composed of weighted components for frequency regulation, voltage profile quality, economic efficiency, DER utilization, and constraint violation penalties. The simulation backbone integrates Newton-Raphson AC power flow with a six-strategy convergence fallback cascade, IEEE 421.5-2016 compliant excitation and power system stabilizer models, TGOV1 governor-turbine dynamics, PI-based automatic generation control with Indian Electricity Grid Code (IEGC) deadband, multi-stage under-frequency load shedding protection, and quadratic economic dispatch with locational marginal pricing. Simulation fidelity is validated through 216 automated tests confirming power flow convergence in four Newton-Raphson iterations.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Multi-agent reinforcement learning, dynamic energy management, microgrids, distributed energy resources, IEEE 39-bus system.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+\subsection{Motivation and Problem Context}
+
+The accelerating integration of distributed energy resources into electric power systems represents one of the defining operational challenges of the contemporary energy transition. Global installed solar photovoltaic capacity exceeded 1.6 TW by the end of 2023 [1], while wind power capacity surpassed 1 TW [2], collectively displacing synchronous generation and fundamentally altering the dynamic characteristics of interconnected grids. In India, the Central Electricity Authority has targeted 500 GW of non-fossil fuel generation capacity by 2030 [3], a trajectory that will subject the Indian grid to unprecedented levels of inverter-based resource penetration, reduced rotational inertia, and bidirectional power flows across distribution and transmission boundaries.
+
+These developments impose simultaneous and often conflicting requirements on grid operators. Frequency regulation becomes more demanding as the displacement of synchronous machines reduces the aggregate system inertia available to arrest rate-of-change-of-frequency (RoCoF) excursions following contingency events [4]. Voltage management grows more complex as spatially distributed, weather-dependent generation introduces rapid fluctuations in reactive power flows [5]. Economic dispatch must accommodate near-zero marginal cost renewable generation while maintaining sufficient conventional reserves for ramping and balancing services [6]. Concurrently, the proliferation of controllable flexible loads---electric vehicle charging, battery energy storage systems, and demand response programs---expands the action space available to grid operators but also increases the combinatorial complexity of real-time optimization [7].
+
+Traditional approaches to these challenges rely on hierarchical, rule-based control architectures: primary droop response at the generator level, secondary automatic generation control (AGC) at the area level, and tertiary economic dispatch at the system level [8]. While these methods are well-understood and mathematically tractable for conventional generation portfolios, they exhibit fundamental limitations in the presence of high DER penetration. Specifically, they assume quasi-static operating conditions, rely on linearised system models that degrade in accuracy under large disturbances, and lack the capacity to learn non-linear relationships between control actions and system responses across stochastic operating conditions [9].
+
+\subsection{Reinforcement Learning for Power System Control}
+
+Reinforcement learning (RL) has emerged as a promising paradigm for power system control, offering the ability to learn optimal policies directly from interaction with complex, non-linear environments without requiring explicit system models [10]. Single-agent deep RL approaches have demonstrated success in voltage regulation [11], economic dispatch [12], and emergency load shedding [13], typically operating on simplified grid models with limited state and action dimensionality.
+
+However, the application of single-agent RL to realistic multi-area power systems encounters the curse of dimensionality: a 117-bus system with 30 generators and diverse DER yields a state space exceeding 300 continuous dimensions and an action space of 60--100 continuous controls. This scale renders single-agent learning intractable due to sample inefficiency and the difficulty of credit assignment across spatially distributed subsystems [14]. Multi-agent reinforcement learning (MARL) addresses this challenge by decomposing the global problem into cooperative sub-problems, where each agent operates on a local observation and action space while collectively optimizing a shared objective [15].
+
+The Centralized Training with Decentralized Execution (CTDE) paradigm [16] is particularly well-suited to power systems, where centralised coordination signals (such as AGC area control error) naturally coexist with decentralised local controllers. Under CTDE, agents share information during training to develop coordinated strategies, but execute their policies independently using only local observations at inference time---mirroring the operational reality of geographically distributed grid controllers communicating through a supervisory energy management system.
+
+\subsection{Proposed Approach}
+
+This paper presents a comprehensive framework that addresses the gaps identified above through four integrated subsystems:
+
+\textbf{1) A Physically Detailed Simulation Environment.} The grid model is a 117-bus tri-area SuperGrid constructed from three merged instances of the IEEE 39-bus New England test system [21], interconnected via eight tie-lines in a mesh topology that ensures N-1 security. The simulation integrates full AC power flow via Newton-Raphson iteration with a six-strategy convergence fallback cascade, per-generator electromechanical dynamics (swing equation with symplectic Euler integration, IEEE IEEET1 excitation system per IEEE Std 421.5-2016 [22], TGOV1 governor-turbine model, and PSS1A power system stabilizer), PI-based automatic generation control with Indian Electricity Grid Code (IEGC) [23] deadband of 0.03 Hz, multi-stage under-frequency load shedding protection (49.5/49.2/49.0 Hz), and a five-type DER fleet (solar PV, wind, battery storage, EV charging, and demand response) compliant with IEEE 1547-2018 [24].
+
+\textbf{2) A Hierarchical Multi-Agent Architecture.} Thirteen PPO agents [25] are organised in a three-level hierarchy. A single central coordination agent observes global state summaries and inter-area tie-line flows (24-dimensional observation) and outputs area generation biases and tie-line flow targets (6-dimensional action). Three microgrid-level agents each manage area-specific generation dispatch and DER curtailment (24-dimensional observation per area, 8-dimensional action). Nine task-specific sub-agents refine individual inverter setpoints, renewable curtailment fractions, and flexible load participation (10-dimensional observations).
+
+\textbf{3) A Multi-Objective, Constraint-Aware Reward Formulation.} Each hierarchy level receives a distinct reward signal composed of weighted sub-components, all individually bounded to $[-1, 1]$. The rewards prioritize frequency regulation, voltage profile quality, economic efficiency, DER utilization, and constraint satisfaction.
+
+\textbf{4) A Reproducible Evaluation Framework.} Eight evaluation scenarios aligned with IEEE and NERC standards have been implemented, spanning normal operation, high renewable penetration, N-1 contingencies, load ramping, islanding, price spikes, and low-inertia conditions.
+
+\subsection{Contributions}
+
+The principal contributions of this work are as follows:
+\begin{enumerate}
+\item \textbf{A physically detailed simulation environment} that integrates AC power flow, IEEE-standard dynamic models, and five DER types into a Gymnasium-compatible MARL interface.
+\item \textbf{A three-level hierarchical CTDE multi-agent architecture} with 13 PPO agents systematically mapped to the operational hierarchy of interconnected power systems.
+\item \textbf{A multi-objective reward design methodology} with bounded, individually interpretable components for transparent trade-off analysis.
+\item \textbf{An IEEE-aligned evaluation protocol} comprising eight stress scenarios and standard reliability/frequency metrics.
+\item \textbf{A validated simulation platform} verified through 216 automated tests confirming stability, power flow accuracy, and standards compliance.
+\end{enumerate}
+
+\section{System Model and Problem Formulation}
+
+\subsection{Network Topology}
+
+The test system is a 117-bus tri-area SuperGrid constructed by merging three instances of the IEEE 39-bus test system. Each area $k \in \{A, B, C\}$ consists of 39 buses indexed with offset $o_k$. The merged network comprises $N_b = 117$ buses, $N_g = 30$ synchronous generators, $N_l = 113$ transmission lines, $N_d = 63$ loads, and $N_{\text{tie}} = 8$ inter-area tie-lines. The tie-line topology $\mathcal{T}$ forms a mesh interconnection ensuring N-1 security.
+
+\subsection{AC Power Flow}
+
+The system operating point is determined by solving the AC power flow equations. For each bus $i$, the complex power injection is:
+\begin{equation}
+S_i = P_i + jQ_i = V_i \sum_{j=1}^{N_b} Y_{ij}^* V_j^*
+\end{equation}
+Expanding into real and imaginary components yields the mismatch equations:
+\begin{equation}
+\Delta P_i = P_{G,i} - P_{D,i} - |V_i| \sum_{j=1}^{N_b} |V_j| \left( G_{ij} \cos\theta_{ij} + B_{ij} \sin\theta_{ij} \right) = 0
+\end{equation}
+\begin{equation}
+\Delta Q_i = Q_{G,i} - Q_{D,i} - |V_i| \sum_{j=1}^{N_b} |V_j| \left( G_{ij} \sin\theta_{ij} - B_{ij} \cos\theta_{ij} \right) = 0
+\end{equation}
+The Newton-Raphson method iteratively solves the linearized system:
+\begin{equation}
+\begin{bmatrix} \Delta \boldsymbol{\theta} \\ \Delta |\mathbf{V}| \end{bmatrix}^{(\nu+1)} = -\mathbf{J}^{-1} \begin{bmatrix} \Delta \mathbf{P} \\ \Delta \mathbf{Q} \end{bmatrix}^{(\nu)}
+\end{equation}
+
+\subsection{Electromechanical Dynamics}
+
+Generator rotor dynamics are modeled via the classical swing equation:
+\begin{equation}
+\frac{d\omega_i}{dt} = \frac{1}{2H_i} \left( P_{m,i} - P_{e,i} - D_i (\omega_i - 1) \right)
+\end{equation}
+\begin{equation}
+\frac{d\delta_i}{dt} = \omega_0 (\omega_i - 1)
+\end{equation}
+System frequency is computed as the center-of-inertia (COI) frequency:
+\begin{equation}
+f_{\text{sys}} = f_0 \cdot \frac{\sum_{i=1}^{N_g} H_i \omega_i}{\sum_{i=1}^{N_g} H_i}
+\end{equation}
+
+Excitation (IEEET1), governor-turbine (TGOV1), and power system stabilizer (PSS1A) models are integrated following IEEE Std 421.5-2016. AGC operates as a PI controller on Area Control Error (ACE):
+\begin{equation}
+\text{ACE}_k = \Delta P_{\text{tie},k} + \beta_k \Delta f
+\end{equation}
+
+\subsection{Problem Formulation}
+
+The dynamic energy management problem is formulated as a cooperative multi-agent Markov decision process (MA-MDP). The objective is to find a joint policy $\boldsymbol{\pi}^*$ that maximises expected discounted cumulative return:
+\begin{equation}
+\boldsymbol{\pi}^* = \arg\max_{\boldsymbol{\pi}} \sum_{n=1}^{13} \mathbb{E}_{\boldsymbol{\pi}} \left[ \sum_{t=0}^{T-1} \gamma^t r_t^n \right]
+\end{equation}
+subject to physical and regulatory constraints including IEGC frequency (49.5--50.5 Hz), IEEE voltage (0.95--1.05 pu), and thermal loading limits.
+
+\section{Proposed Methodology}
+
+\subsection{Hierarchical Agent Architecture}
+
+The 13 PPO agents are organised in a three-level hierarchy:
+\begin{itemize}
+\item \textbf{Level 1: Central Coordination (1 agent)} manages inter-area power balance.
+\item \textbf{Level 2: Microgrid Management (3 agents)} manage area-level generation and DER.
+\item \textbf{Level 3: Sub-Agents (9 agents)} refine asset-level setpoints (Inverter, Renewable, Load).
+\end{itemize}
+
+\subsection{Reward Functions}
+
+All rewards are bounded to $[-1, 1]$. The central agent reward $r^{\text{central}}$ prioritizes frequency regulation ($r_f$) and tie-line flow ($r_{\text{tie}}$). Microgrid agent rewards $r^{\text{mg}}$ emphasize voltage quality ($r_V$) and economic cost ($r_C$).
+The frequency sub-reward is:
+\begin{equation}
+r_f = 1 - \min\left( \left( \frac{|\Delta f|}{0.5} \right)^2, 1 \right)
+\end{equation}
+Voltage profile sub-reward:
+\begin{equation}
+r_V = \frac{1}{2} \left[ \max\left(0, 1 - \frac{|V_{\min} - 1|}{0.05}\right) + \max\left(0, 1 - \frac{|V_{\max} - 1|}{0.05}\right) \right]
+\end{equation}
+
+\subsection{Training and Constraint Handling}
+
+Training follows the Centralized Training with Decentralized Execution (CTDE) paradigm using PPO with Stable-Baselines3. Constraint satisfaction is enforced through reward-based soft penalties and action-space clipping.
+
+\section{Simulation Results}
+
+\subsection{Base-Case Power Flow Validation}
+
+Newton-Raphson converged in 4 iterations on the 117-bus network.
+
+\begin{table}[h]
+\caption{Base-Case Power Flow Results}
+\centering
+\begin{tabular}{lr}
+\toprule
+Metric & Value \\
+\midrule
+Total generation & 18,896.68 MW \\
+Total load & 18,762.69 MW \\
+Active power losses & 133.99 MW (0.709\%) \\
+Power balance error & 0.0000 MW \\
+Newton-Raphson iterations & 4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Preliminary Training Performance}
+
+Preliminary results confirm the operational correctness of the training pipeline. Microgrid agents showed positive reward trends even in early exploration.
+
+\begin{table}[h]
+\caption{Reward by Hierarchy Level (204 Steps)}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Level & Mean Reward & Std & Trend ($\Delta$) \\
+\midrule
+Central & 0.5793 & 0.0052 & +0.0017 \\
+Microgrid & 0.4204 & 0.0409 & +0.0354 \\
+Inverter Sub & 0.6694 & 0.0147 & $-0.0055$ \\
+Renewable Sub & 0.3810 & 0.0525 & $-0.0998$ \\
+Load Sub & 0.7878 & 0.0297 & $-0.0159$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+
+This paper presented a hierarchical MARL framework for dynamic energy management in a 117-bus tri-area power system. The simulation environment integrates Newton-Raphson AC power flow, IEEE-standard dynamic models, and five DER types, all verified through 216 automated tests. The three-level CTDE architecture with 13 PPO agents provides a robust platform for coordinated control across frequency, voltage, and economic objectives. Preliminary training results validate the reward structure and hierarchy-level specialisation, establishing the foundation for extended training and benchmarking against industrial baselines.
+
+\begin{thebibliography}{30}
+\bibitem{1} IRENA, "Renewable Capacity Statistics 2024," 2024.
+\bibitem{2} GWEC, "Global Wind Report 2024," 2024.
+\bibitem{3} CEA, "National Electricity Plan (Volume I)," 2023.
+\bibitem{4} ENTSO-E, "High Penetration of PEI Power Sources," 2020.
+\bibitem{5} A. T. Procopiou et al., "Voltage control in PV-rich networks," \textit{IEEE Trans. Power Syst.}, vol. 32, no. 2, 2017.
+\bibitem{6} F. Ueckerdt et al., "Analyzing major challenges of variability," \textit{Renew. Energy}, 2015.
+\bibitem{7} P. Siano, "Demand response and smart grids---A survey," \textit{Renew. Sustain. Energy Rev.}, 2014.
+\bibitem{8} P. Kundur, \textit{Power System Stability and Control}, McGraw-Hill, 1994.
+\bibitem{9} E. Ela et al., "Evolution of electricity market design," NREL, 2014.
+\bibitem{10} Z. Zhang et al., "DRL for power system applications," \textit{CSEE J. Power Energy Syst.}, 2020.
+\bibitem{11} Q. Yang et al., "Two-timescale voltage control," \textit{IEEE Trans. Smart Grid}, 2020.
+\bibitem{12} Y. Zhou et al., "DRL for economic dispatch," \textit{Appl. Energy}, 2023.
+\bibitem{13} H. Huang et al., "Adaptive frequency control," \textit{Proc. IEEE PESGM}, 2020.
+\bibitem{14} W. Wang et al., "Safe off-policy DRL for volt-VAR control," \textit{IEEE Trans. Smart Grid}, 2020.
+\bibitem{15} K. Zhang et al., "MARL: A selective overview," \textit{Springer}, 2021.
+\bibitem{16} R. Lowe et al., "Multi-agent actor-critic," \textit{Proc. NeurIPS}, 2017.
+\bibitem{21} T. Athay et al., "Direct analysis of transient stability," \textit{IEEE Trans. Power App. Syst.}, 1979.
+\bibitem{22} IEEE, "Excitation System Models," \textit{IEEE Std 421.5-2016}.
+\bibitem{23} CERC, "Indian Electricity Grid Code," 2023.
+\bibitem{24} IEEE, "IEEE Standard 1547-2018," 2018.
+\bibitem{25} J. Schulman et al., "PPO algorithms," \textit{arXiv:1707.06347}, 2017.
+\end{thebibliography}
+
+\end{document}
